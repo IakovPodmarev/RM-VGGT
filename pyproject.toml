@@ -1,9 +1,9 @@
 [project]
 authors = [{name = "Jianyuan Wang", email = "jianyuan@robots.ox.ac.uk"}]
 dependencies = [
-    "numpy<2",
-    "Pillow",
-    "huggingface_hub",
+    "numpy>=1.26,<2",
+    "pillow",
+    "huggingface-hub",
     "einops",
     "safetensors",
     "opencv-python",
@@ -42,11 +42,30 @@ include = ["vggt*"]
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 
+[tool.pixi.system-requirements]
+cuda = "12.4"
+
 [tool.pixi.pypi-dependencies]
-vggt = { path = ".", editable = true }
+onnx = ">=1.16.0, <2"
+torchviz = ">=0.0.2, <0.1"
 
 [tool.pixi.environments]
-default = { solve-group = "default" }
-demo = { features = ["demo"], solve-group = "default" }
+default = { features = ["info"] }
+demo = { features = ["demo"] }
 
 [tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+numpy = "1.26.*"
+pillow = ">=8,<12"
+markupsafe = ">=2,<3"
+pytorch-gpu = "*"
+torchvision = "*"
+cuda-version = "12.4.*"
+graphviz = "*"
+setuptools = ">=82.0.1,<83"
+pip = ">=26.1.1,<27"
+
+[tool.pixi.feature.info.pypi-dependencies]
+torchinfo = "*"

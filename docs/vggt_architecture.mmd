@@ -1,0 +1,34 @@
+
+flowchart TD
+    I["Input images\n[B,S,3,H,W]"] --> NB["Normalize"]
+    NB --> RS[" Reshape 
+        [B*S,3,H,W]"]
+    RS --> PE["Patch tokens\n[B*S,1369,1024] (518/14=37 => 37*37)"]
+    PE --> ST["Add special tokens\n1 camera + 4 register\n[B*S,1374,1024]\npatch_start_idx=5"]
+    ST --> AA["Alternating attention x24\nframe + global per stage\nout list len=24, each [B,S,1374,2048]"]
+
+    AA --> CAM["CameraHead\npose token idx 0 -> [B,S,2048]\n4 iters -> pose [B,S,9]"]
+    AA --> DEP["Depth DPTHead\nlayer idx [4,11,17,23]\noutput depth [B,S,H,W,1], conf [B,S,H,W]"]
+    AA --> PTS["Point DPTHead\nlayer idx [4,11,17,23]\noutput points [B,S,H,W,3], conf [B,S,H,W]"]
+    AA --> TRK["TrackHead (optional query_points)\nfeature maps [B,S,128,H/2,W/2]\ntrack [B,S,N,2], vis/conf [B,S,N]"]
+
+    CAM --> OUT
+    DEP --> OUT
+    PTS --> OUT
+    TRK --> OUT
+
+    OUT["Predictions dict"]
+
+    click I "https://github.com/facebookresearch/vggt/blob/main/vggt/models/vggt.py#L31-L37" "VGGT.forward input contract"
+    click NB "https://github.com/facebookresearch/vggt/blob/main/vggt/models/aggregator.py#L197-L203" "Image normalization"
+    click RS "https://github.com/facebookresearch/vggt/blob/main/vggt/models/aggregator.py#L204-L206" "[B,S,C,H,W] -> [B*S,C,H,W]"
+    click PE "https://github.com/facebookresearch/vggt/blob/main/vggt/layers/patch_embed.py#L66-L76" "PatchEmbed forward"
+    click ST "https://github.com/facebookresearch/vggt/blob/main/vggt/models/aggregator.py#L211-L224" "Special token concat + patch_start_idx"
+    click AA "https://github.com/facebookresearch/vggt/blob/main/vggt/models/aggregator.py#L237-L259" "Alternating frame/global loop"
+
+    click CAM "https://github.com/facebookresearch/vggt/blob/main/vggt/heads/camera_head.py#L78-L134" "Camera iterative refinement"
+    click DEP "https://github.com/facebookresearch/vggt/blob/main/vggt/heads/dpt_head.py#L179-L260" "DPT dense prediction pipeline"
+    click PTS "https://github.com/facebookresearch/vggt/blob/main/vggt/heads/head_act.py#L64-L106" "Head split to xyz/depth + confidence"
+    click TRK "https://github.com/facebookresearch/vggt/blob/main/vggt/heads/track_head.py#L71-L93" "TrackHead forward"
+
+    click OUT "https://github.com/facebookresearch/vggt/blob/main/vggt/models/vggt.py#L76-L114" "Prediction dict assembly"

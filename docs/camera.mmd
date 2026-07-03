@@ -1,0 +1,17 @@
+flowchart LR
+
+    B0["Camera tokens<br>alternating attention"]
+
+    subgraph HEAD["CameraHead"]
+        H2["AdaLN + modulation<br>MLP"]
+        H3["Refinement trunk<br>4 transformer blocks"]
+        H4["Pose encoder<br>MLP"]
+        H2 --> H3 --> H4 
+        H4 -. 4 iterations .-> H2
+    end
+
+    B0 --> H2
+    
+    P1["Prediction<br>translation, rotation, FoV"]
+
+    H4 --> P1
