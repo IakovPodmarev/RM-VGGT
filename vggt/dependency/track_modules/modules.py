@@ -5,13 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from functools import partial
 from typing import Callable
 import collections
-from torch import Tensor
 from itertools import repeat
 
 
@@ -45,9 +42,16 @@ class ResidualBlock(nn.Module):
         super(ResidualBlock, self).__init__()
 
         self.conv1 = nn.Conv2d(
-            in_planes, planes, kernel_size=kernel_size, padding=1, stride=stride, padding_mode="zeros"
+            in_planes,
+            planes,
+            kernel_size=kernel_size,
+            padding=1,
+            stride=stride,
+            padding_mode="zeros",
         )
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=kernel_size, padding=1, padding_mode="zeros")
+        self.conv2 = nn.Conv2d(
+            planes, planes, kernel_size=kernel_size, padding=1, padding_mode="zeros"
+        )
         self.relu = nn.ReLU(inplace=True)
 
         num_groups = planes // 8
@@ -81,7 +85,9 @@ class ResidualBlock(nn.Module):
         if stride == 1:
             self.downsample = None
         else:
-            self.downsample = nn.Sequential(nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride), self.norm3)
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride), self.norm3
+            )
 
     def forward(self, x):
         y = x
@@ -146,7 +152,9 @@ class AttnBlock(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        self.attn = attn_class(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, **block_kwargs)
+        self.attn = attn_class(
+            embed_dim=hidden_size, num_heads=num_heads, batch_first=True, **block_kwargs
+        )
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
 
@@ -170,7 +178,9 @@ class AttnBlock(nn.Module):
 
 
 class CrossAttnBlock(nn.Module):
-    def __init__(self, hidden_size, context_dim, num_heads=1, mlp_ratio=4.0, **block_kwargs):
+    def __init__(
+        self, hidden_size, context_dim, num_heads=1, mlp_ratio=4.0, **block_kwargs
+    ):
         """
         Cross attention block
         """

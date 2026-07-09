@@ -11,7 +11,7 @@ from torchvision import transforms
 def get_image_augmentation(
     color_jitter: Optional[Dict[str, float]] = None,
     gray_scale: bool = True,
-    gau_blur: bool = False
+    gau_blur: bool = False,
 ) -> Optional[transforms.Compose]:
     """Create a composition of image augmentations.
 
@@ -35,7 +35,7 @@ def get_image_augmentation(
         "contrast": 0.5,
         "saturation": 0.5,
         "hue": 0.1,
-        "p": 0.9
+        "p": 0.9,
     }
 
     # Handle color jitter

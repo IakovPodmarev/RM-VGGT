@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import trimesh
-import gradio as gr
 import numpy as np
 import matplotlib
 from scipy.spatial.transform import Rotation
@@ -68,16 +67,26 @@ def predictions_to_glb(
     if "Pointmap" in prediction_mode:
         print("Using Pointmap Branch")
         if "world_points" in predictions:
-            pred_world_points = predictions["world_points"]  # No batch dimension to remove
-            pred_world_points_conf = predictions.get("world_points_conf", np.ones_like(pred_world_points[..., 0]))
+            pred_world_points = predictions[
+                "world_points"
+            ]  # No batch dimension to remove
+            pred_world_points_conf = predictions.get(
+                "world_points_conf", np.ones_like(pred_world_points[..., 0])
+            )
         else:
-            print("Warning: world_points not found in predictions, falling back to depth-based points")
+            print(
+                "Warning: world_points not found in predictions, falling back to depth-based points"
+            )
             pred_world_points = predictions["world_points_from_depth"]
-            pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
+            pred_world_points_conf = predictions.get(
+                "depth_conf", np.ones_like(pred_world_points[..., 0])
+            )
     else:
         print("Using Depthmap and Camera Branch")
         pred_world_points = predictions["world_points_from_depth"]
-        pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
+        pred_world_points_conf = predictions.get(
+            "depth_conf", np.ones_like(pred_world_points[..., 0])
+        )
 
     # Get images from predictions
     images = predictions["images"]
@@ -104,7 +113,8 @@ def predictions_to_glb(
             if not os.path.exists("skyseg.onnx"):
                 print("Downloading skyseg.onnx...")
                 download_file_from_url(
-                    "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx", "skyseg.onnx"
+                    "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx",
+                    "skyseg.onnx",
                 )
 
             for i, image_name in enumerate(image_list):
@@ -119,7 +129,9 @@ def predictions_to_glb(
                     # Generate new mask
                     if skyseg_session is None:
                         skyseg_session = onnxruntime.InferenceSession("skyseg.onnx")
-                    sky_mask = segment_sky(image_filepath, skyseg_session, mask_filepath)
+                    sky_mask = segment_sky(
+                        image_filepath, skyseg_session, mask_filepath
+                    )
 
                 # Resize mask to match H×W if needed
                 if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
@@ -164,7 +176,11 @@ def predictions_to_glb(
     if mask_white_bg:
         # Filter out white background pixels (RGB values close to white)
         # Consider pixels white if all RGB values are above 240
-        white_bg_mask = ~((colors_rgb[:, 0] > 240) & (colors_rgb[:, 1] > 240) & (colors_rgb[:, 2] > 240))
+        white_bg_mask = ~(
+            (colors_rgb[:, 0] > 240)
+            & (colors_rgb[:, 1] > 240)
+            & (colors_rgb[:, 2] > 240)
+        )
         conf_mask = conf_mask & white_bg_mask
 
     vertices_3d = vertices_3d[conf_mask]
@@ -206,7 +222,9 @@ def predictions_to_glb(
             rgba_color = colormap(i / num_cameras)
             current_color = tuple(int(255 * x) for x in rgba_color[:3])
 
-            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
+            integrate_camera_into_scene(
+                scene_3d, camera_to_world, current_color, scene_scale
+            )
 
     # Align scene to the observation of the first camera
     scene_3d = apply_scene_alignment(scene_3d, extrinsics_matrices)
@@ -215,7 +233,9 @@ def predictions_to_glb(
     return scene_3d
 
 
-def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
+def integrate_camera_into_scene(
+    scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float
+):
     """
     Integrates a fake camera mesh into the 3D scene.
 
@@ -260,7 +280,9 @@ def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, fac
     scene.add_geometry(camera_mesh)
 
 
-def apply_scene_alignment(scene_3d: trimesh.Scene, extrinsics_matrices: np.ndarray) -> trimesh.Scene:
+def apply_scene_alignment(
+    scene_3d: trimesh.Scene, extrinsics_matrices: np.ndarray
+) -> trimesh.Scene:
     """
     Aligns the 3D scene based on the extrinsics of the first camera.
 
@@ -279,7 +301,11 @@ def apply_scene_alignment(scene_3d: trimesh.Scene, extrinsics_matrices: np.ndarr
     align_rotation[:3, :3] = Rotation.from_euler("y", 180, degrees=True).as_matrix()
 
     # Apply transformation
-    initial_transformation = np.linalg.inv(extrinsics_matrices[0]) @ opengl_conversion_matrix @ align_rotation
+    initial_transformation = (
+        np.linalg.inv(extrinsics_matrices[0])
+        @ opengl_conversion_matrix
+        @ align_rotation
+    )
     scene_3d.apply_transform(initial_transformation)
     return scene_3d
 
@@ -301,7 +327,9 @@ def get_opengl_conversion_matrix() -> np.ndarray:
     return matrix
 
 
-def transform_points(transformation: np.ndarray, points: np.ndarray, dim: int = None) -> np.ndarray:
+def transform_points(
+    transformation: np.ndarray, points: np.ndarray, dim: int = None
+) -> np.ndarray:
     """
     Applies a 4x4 transformation to a set of points.
 
@@ -318,7 +346,9 @@ def transform_points(transformation: np.ndarray, points: np.ndarray, dim: int = 
     dim = dim or points.shape[-1]
 
     # Apply transformation
-    transformation = transformation.swapaxes(-1, -2)  # Transpose the transformation matrix
+    transformation = transformation.swapaxes(
+        -1, -2
+    )  # Transpose the transformation matrix
     points = points @ transformation[..., :-1, :] + transformation[..., -1:, :]
 
     # Reshape the result

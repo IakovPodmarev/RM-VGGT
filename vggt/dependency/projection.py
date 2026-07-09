@@ -10,7 +10,10 @@ from .distortion import apply_distortion
 
 
 def img_from_cam_np(
-    intrinsics: np.ndarray, points_cam: np.ndarray, extra_params: np.ndarray | None = None, default: float = 0.0
+    intrinsics: np.ndarray,
+    points_cam: np.ndarray,
+    extra_params: np.ndarray | None = None,
+    default: float = 0.0,
 ) -> np.ndarray:
     """
     Apply intrinsics (and optional radial distortion) to camera-space points.
@@ -97,12 +100,21 @@ def project_3D_points_np(
     if intrinsics is None:
         raise ValueError("`intrinsics` must be provided unless only_points_cam=True")
 
-    points2D = img_from_cam_np(intrinsics, points_cam, extra_params=extra_params, default=default)
+    points2D = img_from_cam_np(
+        intrinsics, points_cam, extra_params=extra_params, default=default
+    )
 
     return points2D, points_cam
 
 
-def project_3D_points(points3D, extrinsics, intrinsics=None, extra_params=None, default=0, only_points_cam=False):
+def project_3D_points(
+    points3D,
+    extrinsics,
+    intrinsics=None,
+    extra_params=None,
+    default=0,
+    only_points_cam=False,
+):
     """
     Transforms 3D points to 2D using extrinsic and intrinsic parameters.
     Args:
@@ -120,9 +132,13 @@ def project_3D_points(points3D, extrinsics, intrinsics=None, extra_params=None, 
     with torch.cuda.amp.autocast(dtype=torch.double):
         N = points3D.shape[0]  # Number of points
         B = extrinsics.shape[0]  # Batch size, i.e., number of cameras
-        points3D_homogeneous = torch.cat([points3D, torch.ones_like(points3D[..., 0:1])], dim=1)  # Nx4
+        points3D_homogeneous = torch.cat(
+            [points3D, torch.ones_like(points3D[..., 0:1])], dim=1
+        )  # Nx4
         # Reshape for batch processing
-        points3D_homogeneous = points3D_homogeneous.unsqueeze(0).expand(B, -1, -1)  # BxNx4
+        points3D_homogeneous = points3D_homogeneous.unsqueeze(0).expand(
+            B, -1, -1
+        )  # BxNx4
 
         # Step 1: Apply extrinsic parameters
         # Transform 3D points to camera coordinate system for all cameras
@@ -190,10 +206,14 @@ if __name__ == "__main__":
         intrinsics_torch = torch.tensor(intrinsics)
 
         # Run NumPy implementation
-        points2D_np, points_cam_np = project_3D_points_np(points3D, extrinsics, intrinsics)
+        points2D_np, points_cam_np = project_3D_points_np(
+            points3D, extrinsics, intrinsics
+        )
 
         # Run torch implementation
-        points2D_torch, points_cam_torch = project_3D_points(points3D_torch, extrinsics_torch, intrinsics_torch)
+        points2D_torch, points_cam_torch = project_3D_points(
+            points3D_torch, extrinsics_torch, intrinsics_torch
+        )
 
         # Convert torch output to numpy
         points2D_torch_np = points2D_torch.detach().numpy()

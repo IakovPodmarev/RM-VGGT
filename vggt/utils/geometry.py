@@ -4,12 +4,15 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 import torch
 import numpy as np
 
 
-from vggt.dependency.distortion import apply_distortion, iterative_undistortion, single_undistortion
+from vggt.dependency.distortion import (
+    apply_distortion,
+    iterative_undistortion,
+    single_undistortion,
+)
 
 
 def unproject_depth_map_to_point_map(
@@ -36,7 +39,9 @@ def unproject_depth_map_to_point_map(
     world_points_list = []
     for frame_idx in range(depth_map.shape[0]):
         cur_world_points, _, _ = depth_to_world_coords_points(
-            depth_map[frame_idx].squeeze(-1), extrinsics_cam[frame_idx], intrinsics_cam[frame_idx]
+            depth_map[frame_idx].squeeze(-1),
+            extrinsics_cam[frame_idx],
+            intrinsics_cam[frame_idx],
         )
         world_points_list.append(cur_world_points)
     world_points_array = np.stack(world_points_list, axis=0)
@@ -78,13 +83,17 @@ def depth_to_world_coords_points(
     t_cam_to_world = cam_to_world_extrinsic[:3, 3]
 
     # Apply the rotation and translation to the camera coordinates
-    world_coords_points = np.dot(cam_coords_points, R_cam_to_world.T) + t_cam_to_world  # HxWx3, 3x3 -> HxWx3
+    world_coords_points = (
+        np.dot(cam_coords_points, R_cam_to_world.T) + t_cam_to_world
+    )  # HxWx3, 3x3 -> HxWx3
     # world_coords_points = np.einsum("ij,hwj->hwi", R_cam_to_world, cam_coords_points) + t_cam_to_world
 
     return world_coords_points, cam_coords_points, point_mask
 
 
-def depth_to_cam_coords_points(depth_map: np.ndarray, intrinsic: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def depth_to_cam_coords_points(
+    depth_map: np.ndarray, intrinsic: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Convert a depth map to camera coordinates.
 
@@ -97,7 +106,9 @@ def depth_to_cam_coords_points(depth_map: np.ndarray, intrinsic: np.ndarray) -> 
     """
     H, W = depth_map.shape
     assert intrinsic.shape == (3, 3), "Intrinsic matrix must be 3x3"
-    assert intrinsic[0, 1] == 0 and intrinsic[1, 0] == 0, "Intrinsic matrix must have zero skew"
+    assert intrinsic[0, 1] == 0 and intrinsic[1, 0] == 0, (
+        "Intrinsic matrix must have zero skew"
+    )
 
     # Intrinsic parameters
     fu, fv = intrinsic[0, 0], intrinsic[1, 1]
@@ -181,7 +192,7 @@ def project_world_points_to_camera_points_batch(world_points, cam_extrinsics):
     Returns:
     """
     # TODO: merge this into project_world_points_to_cam
-    
+
     # device = world_points.device
     # with torch.autocast(device_type=device.type, enabled=False):
     ones = torch.ones_like(world_points[..., :1])  # shape: (B, S, H, W, 1)
@@ -198,7 +209,6 @@ def project_world_points_to_camera_points_batch(world_points, cam_extrinsics):
     camera_points = torch.matmul(extrinsics_exp, world_points_h_exp).squeeze(-1)
 
     return camera_points
-
 
 
 def project_world_points_to_cam(
@@ -242,10 +252,11 @@ def project_world_points_to_cam(
             return None, cam_points
 
         # Step 2: Apply intrinsic parameters and (optional) distortion
-        image_points = img_from_cam(cam_intrinsics, cam_points, distortion_params, default=default)
+        image_points = img_from_cam(
+            cam_intrinsics, cam_points, distortion_params, default=default
+        )
 
         return image_points, cam_points
-
 
 
 def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0):
@@ -268,7 +279,9 @@ def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0
 
     # Apply distortion if distortion_params are provided
     if distortion_params is not None:
-        x_distorted, y_distorted = apply_distortion(distortion_params, ndc_xy[:, 0], ndc_xy[:, 1])
+        x_distorted, y_distorted = apply_distortion(
+            distortion_params, ndc_xy[:, 0], ndc_xy[:, 1]
+        )
         distorted_xy = torch.stack([x_distorted, y_distorted], dim=1)
     else:
         distorted_xy = ndc_xy
@@ -287,8 +300,6 @@ def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0
     pixel_coords = torch.nan_to_num(pixel_coords, nan=default)
 
     return pixel_coords.transpose(1, 2)  # BxNx2
-
-
 
 
 def cam_from_img(pred_tracks, intrinsics, extra_params=None):
@@ -313,12 +324,8 @@ def cam_from_img(pred_tracks, intrinsics, extra_params=None):
     if extra_params is not None:
         # Apply iterative undistortion
         try:
-            tracks_normalized = iterative_undistortion(
-                extra_params, tracks_normalized
-            )
+            tracks_normalized = iterative_undistortion(extra_params, tracks_normalized)
         except:
-            tracks_normalized = single_undistortion(
-                extra_params, tracks_normalized
-            )
+            tracks_normalized = single_undistortion(extra_params, tracks_normalized)
 
     return tracks_normalized

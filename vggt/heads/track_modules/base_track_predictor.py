@@ -6,7 +6,7 @@
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 
 
 from .blocks import EfficientUpdateFormer, CorrBlock
@@ -72,14 +72,24 @@ class BaseTrackerPredictor(nn.Module):
         self.ffeat_norm = nn.GroupNorm(1, self.latent_dim)
 
         # A linear layer to update track feats at each iteration
-        self.ffeat_updater = nn.Sequential(nn.Linear(self.latent_dim, self.latent_dim), nn.GELU())
+        self.ffeat_updater = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim), nn.GELU()
+        )
 
         self.vis_predictor = nn.Sequential(nn.Linear(self.latent_dim, 1))
 
         if predict_conf:
             self.conf_predictor = nn.Sequential(nn.Linear(self.latent_dim, 1))
 
-    def forward(self, query_points, fmaps=None, iters=6, return_feat=False, down_ratio=1, apply_sigmoid=True):
+    def forward(
+        self,
+        query_points,
+        fmaps=None,
+        iters=6,
+        return_feat=False,
+        down_ratio=1,
+        apply_sigmoid=True,
+    ):
         """
         query_points: B x N x 2, the number of batches, tracks, and xy
         fmaps: B x S x C x HH x WW, the number of batches, frames, and feature dimension.
@@ -115,7 +125,9 @@ class BaseTrackerPredictor(nn.Module):
         # back up the init coords
         coords_backup = coords.clone()
 
-        fcorr_fn = CorrBlock(fmaps, num_levels=self.corr_levels, radius=self.corr_radius)
+        fcorr_fn = CorrBlock(
+            fmaps, num_levels=self.corr_levels, radius=self.corr_radius
+        )
 
         coord_preds = []
 
@@ -137,25 +149,39 @@ class BaseTrackerPredictor(nn.Module):
             flows_emb = get_2d_embedding(flows, self.flows_emb_dim, cat_coords=False)
 
             # (In my trials, it is also okay to just add the flows_emb instead of concat)
-            flows_emb = torch.cat([flows_emb, flows / self.max_scale, flows / self.max_scale], dim=-1)
+            flows_emb = torch.cat(
+                [flows_emb, flows / self.max_scale, flows / self.max_scale], dim=-1
+            )
 
-            track_feats_ = track_feats.permute(0, 2, 1, 3).reshape(B * N, S, self.latent_dim)
+            track_feats_ = track_feats.permute(0, 2, 1, 3).reshape(
+                B * N, S, self.latent_dim
+            )
 
             # Concatenate them as the input for the transformers
             transformer_input = torch.cat([flows_emb, fcorrs_, track_feats_], dim=2)
 
             # 2D positional embed
             # TODO: this can be much simplified
-            pos_embed = get_2d_sincos_pos_embed(self.transformer_dim, grid_size=(HH, WW)).to(query_points.device)
-            sampled_pos_emb = sample_features4d(pos_embed.expand(B, -1, -1, -1), coords[:, 0])
+            pos_embed = get_2d_sincos_pos_embed(
+                self.transformer_dim, grid_size=(HH, WW)
+            ).to(query_points.device)
+            sampled_pos_emb = sample_features4d(
+                pos_embed.expand(B, -1, -1, -1), coords[:, 0]
+            )
 
-            sampled_pos_emb = rearrange(sampled_pos_emb, "b n c -> (b n) c").unsqueeze(1)
+            sampled_pos_emb = rearrange(sampled_pos_emb, "b n c -> (b n) c").unsqueeze(
+                1
+            )
 
             x = transformer_input + sampled_pos_emb
 
             # Add the query ref token to the track feats
             query_ref_token = torch.cat(
-                [self.query_ref_token[:, 0:1], self.query_ref_token[:, 1:2].expand(-1, S - 1, -1)], dim=1
+                [
+                    self.query_ref_token[:, 0:1],
+                    self.query_ref_token[:, 1:2].expand(-1, S - 1, -1),
+                ],
+                dim=1,
             )
             x = x + query_ref_token.to(x.device).to(x.dtype)
 
@@ -174,9 +200,13 @@ class BaseTrackerPredictor(nn.Module):
             delta_feats_ = delta_feats_.reshape(B * N * S, self.latent_dim)
 
             # Update the track features
-            track_feats_ = self.ffeat_updater(self.ffeat_norm(delta_feats_)) + track_feats_
+            track_feats_ = (
+                self.ffeat_updater(self.ffeat_norm(delta_feats_)) + track_feats_
+            )
 
-            track_feats = track_feats_.reshape(B, N, S, self.latent_dim).permute(0, 2, 1, 3)  # BxSxNxC
+            track_feats = track_feats_.reshape(B, N, S, self.latent_dim).permute(
+                0, 2, 1, 3
+            )  # BxSxNxC
 
             # B x S x N x 2
             coords = coords + delta_coords_.reshape(B, N, S, 2).permute(0, 2, 1, 3)
@@ -192,12 +222,16 @@ class BaseTrackerPredictor(nn.Module):
                 coord_preds.append(coords * self.stride)
 
         # B, S, N
-        vis_e = self.vis_predictor(track_feats.reshape(B * S * N, self.latent_dim)).reshape(B, S, N)
+        vis_e = self.vis_predictor(
+            track_feats.reshape(B * S * N, self.latent_dim)
+        ).reshape(B, S, N)
         if apply_sigmoid:
             vis_e = torch.sigmoid(vis_e)
 
         if self.predict_conf:
-            conf_e = self.conf_predictor(track_feats.reshape(B * S * N, self.latent_dim)).reshape(B, S, N)
+            conf_e = self.conf_predictor(
+                track_feats.reshape(B * S * N, self.latent_dim)
+            ).reshape(B, S, N)
             if apply_sigmoid:
                 conf_e = torch.sigmoid(conf_e)
         else:

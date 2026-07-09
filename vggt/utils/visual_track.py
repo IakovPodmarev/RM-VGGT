@@ -34,7 +34,9 @@ def color_from_xy(x, y, W, H, cmap_name="hsv"):
     return (r, g, b)  # in [0,1], RGB order
 
 
-def get_track_colors_by_position(tracks_b, vis_mask_b=None, image_width=None, image_height=None, cmap_name="hsv"):
+def get_track_colors_by_position(
+    tracks_b, vis_mask_b=None, image_width=None, image_height=None, cmap_name="hsv"
+):
     """
     Given all tracks in one sample (b), compute a (N,3) array of RGB color values
     in [0,255]. The color is determined by the (x,y) position in the first
@@ -69,7 +71,9 @@ def get_track_colors_by_position(tracks_b, vis_mask_b=None, image_width=None, im
         x, y = tracks_b[first_s, i].tolist()
 
         # map (x,y) -> (R,G,B) in [0,1]
-        r, g, b = color_from_xy(x, y, W=image_width, H=image_height, cmap_name=cmap_name)
+        r, g, b = color_from_xy(
+            x, y, W=image_width, H=image_height, cmap_name=cmap_name
+        )
         # scale to [0,255]
         r, g, b = int(r * 255), int(g * 255), int(b * 255)
         track_colors[i] = (r, g, b)

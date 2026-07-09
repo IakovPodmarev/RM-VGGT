@@ -20,7 +20,9 @@ def randomly_limit_trues(mask: np.ndarray, max_trues: int) -> np.ndarray:
         return mask
 
     # randomly pick which True positions to keep
-    sampled_indices = np.random.choice(true_indices, size=max_trues, replace=False)  # shape = (max_trues,)
+    sampled_indices = np.random.choice(
+        true_indices, size=max_trues, replace=False
+    )  # shape = (max_trues,)
 
     # build new flat mask: True only at sampled positions
     limited_flat_mask = np.zeros(mask.size, dtype=bool)

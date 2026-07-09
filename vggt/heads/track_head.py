@@ -69,7 +69,14 @@ class TrackHead(nn.Module):
 
         self.iters = iters
 
-    def forward(self, aggregated_tokens_list, images, patch_start_idx, query_points=None, iters=None):
+    def forward(
+        self,
+        aggregated_tokens_list,
+        images,
+        patch_start_idx,
+        query_points=None,
+        iters=None,
+    ):
         """
         Forward pass of the TrackHead.
 
@@ -92,13 +99,17 @@ class TrackHead(nn.Module):
 
         # Extract features from tokens
         # feature_maps has shape (B, S, C, H//2, W//2) due to down_ratio=2
-        feature_maps = self.feature_extractor(aggregated_tokens_list, images, patch_start_idx)
+        feature_maps = self.feature_extractor(
+            aggregated_tokens_list, images, patch_start_idx
+        )
 
         # Use default iterations if not specified
         if iters is None:
             iters = self.iters
 
         # Perform tracking using the extracted features
-        coord_preds, vis_scores, conf_scores = self.tracker(query_points=query_points, fmaps=feature_maps, iters=iters)
+        coord_preds, vis_scores, conf_scores = self.tracker(
+            query_points=query_points, fmaps=feature_maps, iters=iters
+        )
 
         return coord_preds, vis_scores, conf_scores

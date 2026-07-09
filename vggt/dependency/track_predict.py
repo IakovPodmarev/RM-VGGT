@@ -56,7 +56,9 @@ def predict_tracks(
     tracker = build_vggsfm_tracker().to(device, dtype)
 
     # Find query frames
-    query_frame_indexes = generate_rank_by_dino(images, query_frame_num=query_frame_num, device=device)
+    query_frame_indexes = generate_rank_by_dino(
+        images, query_frame_num=query_frame_num, device=device
+    )
 
     # Add the first image to the front if not already present
     if 0 in query_frame_indexes:
@@ -101,23 +103,25 @@ def predict_tracks(
         pred_colors.append(pred_color)
 
     if complete_non_vis:
-        pred_tracks, pred_vis_scores, pred_confs, pred_points_3d, pred_colors = _augment_non_visible_frames(
-            pred_tracks,
-            pred_vis_scores,
-            pred_confs,
-            pred_points_3d,
-            pred_colors,
-            images,
-            conf,
-            points_3d,
-            fmaps_for_tracker,
-            keypoint_extractors,
-            tracker,
-            max_points_num,
-            fine_tracking,
-            min_vis=500,
-            non_vis_thresh=0.1,
-            device=device,
+        pred_tracks, pred_vis_scores, pred_confs, pred_points_3d, pred_colors = (
+            _augment_non_visible_frames(
+                pred_tracks,
+                pred_vis_scores,
+                pred_confs,
+                pred_points_3d,
+                pred_colors,
+                images,
+                conf,
+                points_3d,
+                fmaps_for_tracker,
+                keypoint_extractors,
+                tracker,
+                max_points_num,
+                fine_tracking,
+                min_vis=500,
+                non_vis_thresh=0.1,
+                device=device,
+            )
         )
 
     pred_tracks = np.concatenate(pred_tracks, axis=1)
@@ -169,12 +173,16 @@ def _forward_on_query(
     frame_num, _, height, width = images.shape
 
     query_image = images[query_index]
-    query_points = extract_keypoints(query_image, keypoint_extractors, round_keypoints=False)
+    query_points = extract_keypoints(
+        query_image, keypoint_extractors, round_keypoints=False
+    )
     query_points = query_points[:, torch.randperm(query_points.shape[1], device=device)]
 
     # Extract the color at the keypoint locations
     query_points_long = query_points.squeeze(0).round().long()
-    pred_color = images[query_index][:, query_points_long[:, 1], query_points_long[:, 0]]
+    pred_color = images[query_index][
+        :, query_points_long[:, 1], query_points_long[:, 0]
+    ]
     pred_color = (pred_color.permute(1, 0).cpu().numpy() * 255).astype(np.uint8)
 
     # Query the confidence and points_3d at the keypoint locations
@@ -187,8 +195,12 @@ def _forward_on_query(
         query_points_scaled = (query_points.squeeze(0) * scale).round().long()
         query_points_scaled = query_points_scaled.cpu().numpy()
 
-        pred_conf = conf[query_index][query_points_scaled[:, 1], query_points_scaled[:, 0]]
-        pred_point_3d = points_3d[query_index][query_points_scaled[:, 1], query_points_scaled[:, 0]]
+        pred_conf = conf[query_index][
+            query_points_scaled[:, 1], query_points_scaled[:, 0]
+        ]
+        pred_point_3d = points_3d[query_index][
+            query_points_scaled[:, 1], query_points_scaled[:, 0]
+        ]
 
         # heuristic to remove low confidence points
         # should I export this as an input parameter?
@@ -204,7 +216,9 @@ def _forward_on_query(
 
     reorder_index = calculate_index_mappings(query_index, frame_num, device=device)
 
-    images_feed, fmaps_feed = switch_tensor_order([images, fmaps_for_tracker], reorder_index, dim=0)
+    images_feed, fmaps_feed = switch_tensor_order(
+        [images, fmaps_for_tracker], reorder_index, dim=0
+    )
     images_feed = images_feed[None]  # add batch dimension
     fmaps_feed = fmaps_feed[None]  # add batch dimension
 
@@ -221,7 +235,9 @@ def _forward_on_query(
         tracker, images_feed, query_points, fmaps_feed, fine_tracking=fine_tracking
     )
 
-    pred_track, pred_vis = switch_tensor_order([pred_track, pred_vis], reorder_index, dim=1)
+    pred_track, pred_vis = switch_tensor_order(
+        [pred_track, pred_vis], reorder_index, dim=1
+    )
 
     pred_track = pred_track.squeeze(0).float().cpu().numpy()
     pred_vis = pred_vis.squeeze(0).float().cpu().numpy()
@@ -293,7 +309,9 @@ def _augment_non_visible_frames(
         if non_vis_frames[0] == last_query:
             # Same frame failed twice - final "all-in" attempt
             final_trial = True
-            cur_extractors = initialize_feature_extractors(2048, extractor_method="sp+sift+aliked", device=device)
+            cur_extractors = initialize_feature_extractors(
+                2048, extractor_method="sp+sift+aliked", device=device
+            )
             query_frame_list = non_vis_frames  # blast them all at once
         else:
             query_frame_list = [non_vis_frames[0]]  # Process one at a time

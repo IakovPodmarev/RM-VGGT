@@ -48,7 +48,13 @@ def single_undistortion(params, tracks_normalized):
     return torch.stack([u_undist, v_undist], dim=-1)
 
 
-def iterative_undistortion(params, tracks_normalized, max_iterations=100, max_step_norm=1e-10, rel_step_size=1e-6):
+def iterative_undistortion(
+    params,
+    tracks_normalized,
+    max_iterations=100,
+    max_step_norm=1e-10,
+    rel_step_size=1e-6,
+):
     """
     Iteratively undistort the normalized tracks using the given distortion parameters.
 
@@ -78,12 +84,30 @@ def iterative_undistortion(params, tracks_normalized, max_iterations=100, max_st
         step_u = torch.clamp(torch.abs(u) * rel_step_size, min=eps)
         step_v = torch.clamp(torch.abs(v) * rel_step_size, min=eps)
 
-        J_00 = (apply_distortion(params, u + step_u, v)[0] - apply_distortion(params, u - step_u, v)[0]) / (2 * step_u)
-        J_01 = (apply_distortion(params, u, v + step_v)[0] - apply_distortion(params, u, v - step_v)[0]) / (2 * step_v)
-        J_10 = (apply_distortion(params, u + step_u, v)[1] - apply_distortion(params, u - step_u, v)[1]) / (2 * step_u)
-        J_11 = (apply_distortion(params, u, v + step_v)[1] - apply_distortion(params, u, v - step_v)[1]) / (2 * step_v)
+        J_00 = (
+            apply_distortion(params, u + step_u, v)[0]
+            - apply_distortion(params, u - step_u, v)[0]
+        ) / (2 * step_u)
+        J_01 = (
+            apply_distortion(params, u, v + step_v)[0]
+            - apply_distortion(params, u, v - step_v)[0]
+        ) / (2 * step_v)
+        J_10 = (
+            apply_distortion(params, u + step_u, v)[1]
+            - apply_distortion(params, u - step_u, v)[1]
+        ) / (2 * step_u)
+        J_11 = (
+            apply_distortion(params, u, v + step_v)[1]
+            - apply_distortion(params, u, v - step_v)[1]
+        ) / (2 * step_v)
 
-        J = torch.stack([torch.stack([J_00 + 1, J_01], dim=-1), torch.stack([J_10, J_11 + 1], dim=-1)], dim=-2)
+        J = torch.stack(
+            [
+                torch.stack([J_00 + 1, J_01], dim=-1),
+                torch.stack([J_10, J_11 + 1], dim=-1),
+            ],
+            dim=-2,
+        )
 
         delta = torch.linalg.solve(J, torch.stack([dx, dy], dim=-1))
 
@@ -136,7 +160,12 @@ def apply_distortion(extra_params, u, v):
 
     elif num_params == 4:
         # OpenCVCameraModel distortion
-        k1, k2, p1, p2 = (extra_params[:, 0], extra_params[:, 1], extra_params[:, 2], extra_params[:, 3])
+        k1, k2, p1, p2 = (
+            extra_params[:, 0],
+            extra_params[:, 1],
+            extra_params[:, 2],
+            extra_params[:, 3],
+        )
         u2 = u * u
         v2 = v * v
         uv = u * v
@@ -163,16 +192,26 @@ if __name__ == "__main__":
         B = random.randint(1, 500)
         track_num = random.randint(100, 1000)
         params = torch.rand((B, 1), dtype=torch.float32)  # Batch size 1, 4 parameters
-        tracks_normalized = torch.rand((B, track_num, 2), dtype=torch.float32)  # Batch size 1, 5 points
+        tracks_normalized = torch.rand(
+            (B, track_num, 2), dtype=torch.float32
+        )  # Batch size 1, 5 points
 
         # Undistort the tracks
         undistorted_tracks = iterative_undistortion(params, tracks_normalized)
 
         for b in range(B):
             pycolmap_intri = np.array([1, 0, 0, params[b].item()])
-            pycam = pycolmap.Camera(model="SIMPLE_RADIAL", width=1, height=1, params=pycolmap_intri, camera_id=0)
+            pycam = pycolmap.Camera(
+                model="SIMPLE_RADIAL",
+                width=1,
+                height=1,
+                params=pycolmap_intri,
+                camera_id=0,
+            )
 
-            undistorted_tracks_pycolmap = pycam.cam_from_img(tracks_normalized[b].numpy())
+            undistorted_tracks_pycolmap = pycam.cam_from_img(
+                tracks_normalized[b].numpy()
+            )
             diff = (undistorted_tracks[b] - undistorted_tracks_pycolmap).abs().median()
             max_diff = max(max_diff, diff)
             print(f"diff: {diff}, max_diff: {max_diff}")

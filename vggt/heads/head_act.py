@@ -9,7 +9,9 @@ import torch
 import torch.nn.functional as F
 
 
-def activate_pose(pred_pose_enc, trans_act="linear", quat_act="linear", fl_act="linear"):
+def activate_pose(
+    pred_pose_enc, trans_act="linear", quat_act="linear", fl_act="linear"
+):
     """
     Activate pose parameters with specified activation functions.
 

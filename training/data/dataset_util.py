@@ -5,12 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 import math
 import numpy as np
 from PIL import Image
 import PIL
+
 try:
     lanczos = PIL.Image.Resampling.LANCZOS
     bicubic = PIL.Image.Resampling.BICUBIC
@@ -21,15 +23,14 @@ except AttributeError:
 from vggt.utils.geometry import closed_form_inverse_se3
 
 
-
 #####################################################################################################################
 def crop_image_depth_and_intrinsic_by_pp(
     image, depth_map, intrinsic, target_shape, track=None, filepath=None, strict=False
 ):
     """
     TODO: some names of width and height seem not consistent. Need to check.
-    
-    
+
+
     Crops the given image and depth map around the camera's principal point, as defined by `intrinsic`.
     Specifically:
       - Ensures that the crop is centered on (cx, cy).
@@ -87,8 +88,8 @@ def crop_image_depth_and_intrinsic_by_pp(
         raise AssertionError(error_message)
 
     # Identify principal point (cx, cy) from intrinsic
-    cx = (intrinsic[1, 2])
-    cy = (intrinsic[0, 2])
+    cx = intrinsic[1, 2]
+    cy = intrinsic[0, 2]
 
     # Compute how far we can crop in each direction
     if strict:
@@ -226,7 +227,9 @@ def resize_image_depth_and_intrinsic(
     image = Image.fromarray(image)
     input_resolution = np.array(image.size)
     output_resolution = np.floor(input_resolution * max_resize_scale).astype(int)
-    image = image.resize(tuple(output_resolution), resample=lanczos if max_resize_scale < 1 else bicubic)
+    image = image.resize(
+        tuple(output_resolution), resample=lanczos if max_resize_scale < 1 else bicubic
+    )
     image = np.array(image)
 
     if depth_map is not None:
@@ -360,7 +363,7 @@ def depth_to_world_coords_points(
     # Apply the rotation and translation to the camera coordinates
     world_coords_points = (
         np.dot(cam_coords_points, R_cam_to_world.T) + t_cam_to_world
-    ) # HxWx3, 3x3 -> HxWx3
+    )  # HxWx3, 3x3 -> HxWx3
     # world_coords_points = np.einsum("ij,hwj->hwi", R_cam_to_world, cam_coords_points) + t_cam_to_world
 
     return world_coords_points, cam_coords_points, point_mask
@@ -388,9 +391,9 @@ def depth_to_cam_coords_points(
     """
     H, W = depth_map.shape
     assert intrinsic.shape == (3, 3), "Intrinsic matrix must be 3x3"
-    assert (
-        intrinsic[0, 1] == 0 and intrinsic[1, 0] == 0
-    ), "Intrinsic matrix must have zero skew"
+    assert intrinsic[0, 1] == 0 and intrinsic[1, 0] == 0, (
+        "Intrinsic matrix must have zero skew"
+    )
 
     # Intrinsic parameters
     fu, fv = intrinsic[0, 0], intrinsic[1, 1]
@@ -398,7 +401,7 @@ def depth_to_cam_coords_points(
 
     # Generate grid of pixel coordinates
     u, v = np.meshgrid(np.arange(W), np.arange(H))
-    
+
     # Unproject to camera coordinates
     x_cam = (u - cu) * depth_map / fu
     y_cam = (v - cv) * depth_map / fv
@@ -450,9 +453,13 @@ def rotate_90_degrees(
     image_height, image_width = image.shape[:2]
 
     # Rotate the image and depth map
-    rotated_image, rotated_depth_map = rotate_image_and_depth_rot90(image, depth_map, clockwise)
+    rotated_image, rotated_depth_map = rotate_image_and_depth_rot90(
+        image, depth_map, clockwise
+    )
     # Adjust the intrinsic matrix
-    new_intri_opencv = adjust_intrinsic_matrix_rot90(intri_opencv, image_width, image_height, clockwise)
+    new_intri_opencv = adjust_intrinsic_matrix_rot90(
+        intri_opencv, image_width, image_height, clockwise
+    )
 
     if track is not None:
         new_track = adjust_track_rot90(track, image_width, image_height, clockwise)
@@ -527,17 +534,9 @@ def adjust_extrinsic_matrix_rot90(extri_opencv, clockwise):
     t = extri_opencv[:, 3]
 
     if clockwise:
-        R_rotation = np.array([
-            [0, -1, 0],
-            [1,  0, 0],
-            [0,  0, 1]
-        ])
+        R_rotation = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
     else:
-        R_rotation = np.array([
-            [0, 1, 0],
-            [-1, 0, 0],
-            [0, 0, 1]
-        ])
+        R_rotation = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
 
     new_R = np.dot(R_rotation, R)
     new_t = np.dot(R_rotation, t)

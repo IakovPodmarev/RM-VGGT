@@ -6,7 +6,6 @@
 
 
 import logging
-import os
 import copy
 import sys
 import atexit
@@ -24,7 +23,6 @@ def _cached_log_stream(filename):
     io = g_pathmgr.open(filename, mode="a", buffering=log_buffer_kb)
     atexit.register(io.close)
     return io
-
 
 
 def setup_logging(

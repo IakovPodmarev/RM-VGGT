@@ -9,7 +9,7 @@ import glob
 import time
 import threading
 import argparse
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
@@ -27,7 +27,10 @@ except ImportError:
 from visual_util import segment_sky, download_file_from_url
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
-from vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
+from vggt.utils.geometry import (
+    closed_form_inverse_se3,
+    unproject_depth_map_to_point_map,
+)
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 
@@ -79,7 +82,9 @@ def viser_wrapper(
 
     # Compute world points from depth if not using the precomputed point map
     if not use_point_map:
-        world_points = unproject_depth_map_to_point_map(depth_map, extrinsics_cam, intrinsics_cam)
+        world_points = unproject_depth_map_to_point_map(
+            depth_map, extrinsics_cam, intrinsics_cam
+        )
         conf = depth_conf
     else:
         world_points = world_points_map
@@ -99,7 +104,9 @@ def viser_wrapper(
     colors_flat = (colors.reshape(-1, 3) * 255).astype(np.uint8)
     conf_flat = conf.reshape(-1)
 
-    cam_to_world_mat = closed_form_inverse_se3(extrinsics_cam)  # shape (S, 4, 4) typically
+    cam_to_world_mat = closed_form_inverse_se3(
+        extrinsics_cam
+    )  # shape (S, 4, 4) typically
     # For convenience, we store only (3,4) portion
     cam_to_world = cam_to_world_mat[:, :3, :]
 
@@ -116,11 +123,17 @@ def viser_wrapper(
 
     # Now the slider represents percentage of points to filter out
     gui_points_conf = server.gui.add_slider(
-        "Confidence Percent", min=0, max=100, step=0.1, initial_value=init_conf_threshold
+        "Confidence Percent",
+        min=0,
+        max=100,
+        step=0.1,
+        initial_value=init_conf_threshold,
     )
 
     gui_frame_selector = server.gui.add_dropdown(
-        "Show Points from Frames", options=["All"] + [str(i) for i in range(S)], initial_value="All"
+        "Show Points from Frames",
+        options=["All"] + [str(i) for i in range(S)],
+        initial_value="All",
     )
 
     # Create the main point cloud handle
@@ -154,7 +167,9 @@ def viser_wrapper(
         frustums.clear()
 
         # Optionally attach a callback that sets the viewpoint to the chosen camera
-        def attach_callback(frustum: viser.CameraFrustumHandle, frame: viser.FrameHandle) -> None:
+        def attach_callback(
+            frustum: viser.CameraFrustumHandle, frame: viser.FrameHandle
+        ) -> None:
             @frustum.on_click
             def _(_) -> None:
                 for client in server.get_clients().values():
@@ -191,7 +206,12 @@ def viser_wrapper(
 
             # Add the frustum
             frustum_cam = server.scene.add_camera_frustum(
-                f"frame_{img_id}/frustum", fov=fov, aspect=w / h, scale=0.05, image=img, line_width=1.0
+                f"frame_{img_id}/frustum",
+                fov=fov,
+                aspect=w / h,
+                scale=0.05,
+                image=img,
+                line_width=1.0,
             )
             frustums.append(frustum_cam)
             attach_callback(frustum_cam, frame_axis)
@@ -202,7 +222,9 @@ def viser_wrapper(
         current_percentage = gui_points_conf.value
         threshold_val = np.percentile(conf_flat, current_percentage)
 
-        print(f"Threshold absolute value: {threshold_val}, percentage: {current_percentage}%")
+        print(
+            f"Threshold absolute value: {threshold_val}, percentage: {current_percentage}%"
+        )
 
         conf_mask = (conf_flat >= threshold_val) & (conf_flat > 1e-5)
 
@@ -273,14 +295,19 @@ def apply_sky_segmentation(conf: np.ndarray, image_folder: str) -> np.ndarray:
     # Download skyseg.onnx if it doesn't exist
     if not os.path.exists("skyseg.onnx"):
         print("Downloading skyseg.onnx...")
-        download_file_from_url("https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx", "skyseg.onnx")
+        download_file_from_url(
+            "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx",
+            "skyseg.onnx",
+        )
 
     skyseg_session = onnxruntime.InferenceSession("skyseg.onnx")
     image_files = sorted(glob.glob(os.path.join(image_folder, "*")))
     sky_mask_list = []
 
     print("Generating sky masks...")
-    for i, image_path in enumerate(tqdm(image_files[:S])):  # Limit to the number of images in the batch
+    for i, image_path in enumerate(
+        tqdm(image_files[:S])
+    ):  # Limit to the number of images in the batch
         image_name = os.path.basename(image_path)
         mask_filepath = os.path.join(sky_masks_dir, image_name)
 
@@ -305,17 +332,39 @@ def apply_sky_segmentation(conf: np.ndarray, image_folder: str) -> np.ndarray:
     return conf
 
 
-parser = argparse.ArgumentParser(description="VGGT demo with viser for 3D visualization")
-parser.add_argument(
-    "--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images"
+parser = argparse.ArgumentParser(
+    description="VGGT demo with viser for 3D visualization"
 )
-parser.add_argument("--use_point_map", action="store_true", help="Use point map instead of depth-based points")
-parser.add_argument("--background_mode", action="store_true", help="Run the viser server in background mode")
-parser.add_argument("--port", type=int, default=8080, help="Port number for the viser server")
 parser.add_argument(
-    "--conf_threshold", type=float, default=25.0, help="Initial percentage of low-confidence points to filter out"
+    "--image_folder",
+    type=str,
+    default="examples/kitchen/images/",
+    help="Path to folder containing images",
 )
-parser.add_argument("--mask_sky", action="store_true", help="Apply sky segmentation to filter out sky points")
+parser.add_argument(
+    "--use_point_map",
+    action="store_true",
+    help="Use point map instead of depth-based points",
+)
+parser.add_argument(
+    "--background_mode",
+    action="store_true",
+    help="Run the viser server in background mode",
+)
+parser.add_argument(
+    "--port", type=int, default=8080, help="Port number for the viser server"
+)
+parser.add_argument(
+    "--conf_threshold",
+    type=float,
+    default=25.0,
+    help="Initial percentage of low-confidence points to filter out",
+)
+parser.add_argument(
+    "--mask_sky",
+    action="store_true",
+    help="Apply sky segmentation to filter out sky points",
+)
 
 
 def main():
@@ -360,21 +409,27 @@ def main():
     print(f"Preprocessed images shape: {images.shape}")
 
     print("Running inference...")
-    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    dtype = (
+        torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    )
 
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             predictions = model(images)
 
     print("Converting pose encoding to extrinsic and intrinsic matrices...")
-    extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
+    extrinsic, intrinsic = pose_encoding_to_extri_intri(
+        predictions["pose_enc"], images.shape[-2:]
+    )
     predictions["extrinsic"] = extrinsic
     predictions["intrinsic"] = intrinsic
 
     print("Processing model outputs...")
     for key in predictions.keys():
         if isinstance(predictions[key], torch.Tensor):
-            predictions[key] = predictions[key].cpu().numpy().squeeze(0)  # remove batch dimension and convert to numpy
+            predictions[key] = (
+                predictions[key].cpu().numpy().squeeze(0)
+            )  # remove batch dimension and convert to numpy
 
     if args.use_point_map:
         print("Visualizing 3D points from point map")

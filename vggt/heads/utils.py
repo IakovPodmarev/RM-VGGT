@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-import torch.nn as nn
 
 
-def position_grid_to_embed(pos_grid: torch.Tensor, embed_dim: int, omega_0: float = 100) -> torch.Tensor:
+def position_grid_to_embed(
+    pos_grid: torch.Tensor, embed_dim: int, omega_0: float = 100
+) -> torch.Tensor:
     """
     Convert 2D position grid (HxWx2) to sinusoidal embeddings (HxWxC)
 
@@ -24,8 +25,12 @@ def position_grid_to_embed(pos_grid: torch.Tensor, embed_dim: int, omega_0: floa
     pos_flat = pos_grid.reshape(-1, grid_dim)  # Flatten to (H*W, 2)
 
     # Process x and y coordinates separately
-    emb_x = make_sincos_pos_embed(embed_dim // 2, pos_flat[:, 0], omega_0=omega_0)  # [1, H*W, D/2]
-    emb_y = make_sincos_pos_embed(embed_dim // 2, pos_flat[:, 1], omega_0=omega_0)  # [1, H*W, D/2]
+    emb_x = make_sincos_pos_embed(
+        embed_dim // 2, pos_flat[:, 0], omega_0=omega_0
+    )  # [1, H*W, D/2]
+    emb_y = make_sincos_pos_embed(
+        embed_dim // 2, pos_flat[:, 1], omega_0=omega_0
+    )  # [1, H*W, D/2]
 
     # Combine and reshape
     emb = torch.cat([emb_x, emb_y], dim=-1)  # [1, H*W, D]
@@ -33,7 +38,9 @@ def position_grid_to_embed(pos_grid: torch.Tensor, embed_dim: int, omega_0: floa
     return emb.view(H, W, embed_dim)  # [H, W, D]
 
 
-def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 100) -> torch.Tensor:
+def make_sincos_pos_embed(
+    embed_dim: int, pos: torch.Tensor, omega_0: float = 100
+) -> torch.Tensor:
     """
     This function generates a 1D positional embedding from a given grid using sine and cosine functions.
 
@@ -46,7 +53,11 @@ def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 10
     """
     assert embed_dim % 2 == 0
     device = pos.device
-    omega = torch.arange(embed_dim // 2, dtype=torch.float32 if device.type == "mps" else torch.double, device=device)
+    omega = torch.arange(
+        embed_dim // 2,
+        dtype=torch.float32 if device.type == "mps" else torch.double,
+        device=device,
+    )
     omega /= embed_dim / 2.0
     omega = 1.0 / omega_0**omega  # (D/2,)
 
@@ -64,7 +75,11 @@ def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 10
 
 
 def create_uv_grid(
-    width: int, height: int, aspect_ratio: float = None, dtype: torch.dtype = None, device: torch.device = None
+    width: int,
+    height: int,
+    aspect_ratio: float = None,
+    dtype: torch.dtype = None,
+    device: torch.device = None,
 ) -> torch.Tensor:
     """
     Create a normalized UV grid of shape (width, height, 2).

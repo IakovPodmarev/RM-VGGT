@@ -6,7 +6,7 @@ dependencies = [
     "huggingface-hub",
     "einops",
     "safetensors",
-    "opencv-python",
+    "opencv-python", "iopath>=0.1.10,<0.2", "wcmatch>=10.2.1,<11",
 ]
 name = "vggt"
 requires-python = ">= 3.10"
@@ -66,6 +66,9 @@ cuda-version = "12.4.*"
 graphviz = "*"
 setuptools = ">=82.0.1,<83"
 pip = ">=26.1.1,<27"
+pytest = ">=9.1.1,<10"
+pre-commit = ">=4.6.0,<5"
+ruff = ">=0.15.20,<0.16"
 
 [tool.pixi.feature.info.pypi-dependencies]
 torchinfo = "*"

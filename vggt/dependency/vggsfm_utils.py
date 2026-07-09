@@ -6,10 +6,7 @@
 
 import logging
 import warnings
-from typing import Dict, List, Optional, Tuple, Union
 
-import numpy as np
-import pycolmap
 import torch
 import torch.nn.functional as F
 from lightglue import ALIKED, SIFT, SuperPoint
@@ -39,7 +36,9 @@ def build_vggsfm_tracker(model_path=None):
     tracker = TrackerPredictor()
 
     if model_path is None:
-        default_url = "https://huggingface.co/facebook/VGGSfM/resolve/main/vggsfm_v2_tracker.pt"
+        default_url = (
+            "https://huggingface.co/facebook/VGGSfM/resolve/main/vggsfm_v2_tracker.pt"
+        )
         tracker.load_state_dict(torch.hub.load_state_dict_from_url(default_url))
     else:
         tracker.load_state_dict(torch.load(model_path))
@@ -49,7 +48,12 @@ def build_vggsfm_tracker(model_path=None):
 
 
 def generate_rank_by_dino(
-    images, query_frame_num, image_size=336, model_name="dinov2_vitb14_reg", device="cuda", spatial_similarity=False
+    images,
+    query_frame_num,
+    image_size=336,
+    model_name="dinov2_vitb14_reg",
+    device="cuda",
+    spatial_similarity=False,
 ):
     """
     Generate a ranking of frames using DINO ViT features.
@@ -66,7 +70,9 @@ def generate_rank_by_dino(
         List of frame indices ranked by their representativeness
     """
     # Resize images to the target size
-    images = F.interpolate(images, (image_size, image_size), mode="bilinear", align_corners=False)
+    images = F.interpolate(
+        images, (image_size, image_size), mode="bilinear", align_corners=False
+    )
 
     # Load DINO model
     dino_v2_model = torch.hub.load("facebookresearch/dinov2", model_name)
@@ -88,7 +94,9 @@ def generate_rank_by_dino(
 
         # Compute the similarity matrix
         frame_feat_norm = frame_feat_norm.permute(1, 0, 2)
-        similarity_matrix = torch.bmm(frame_feat_norm, frame_feat_norm.transpose(-1, -2))
+        similarity_matrix = torch.bmm(
+            frame_feat_norm, frame_feat_norm.transpose(-1, -2)
+        )
         similarity_matrix = similarity_matrix.mean(dim=0)
     else:
         frame_feat = frame_feat["x_norm_clstoken"]
@@ -105,7 +113,9 @@ def generate_rank_by_dino(
     most_common_frame_index = torch.argmax(similarity_sum).item()
 
     # Conduct FPS sampling starting from the most common frame
-    fps_idx = farthest_point_sampling(distance_matrix, query_frame_num, most_common_frame_index)
+    fps_idx = farthest_point_sampling(
+        distance_matrix, query_frame_num, most_common_frame_index
+    )
 
     # Clean up all tensors and models to free memory
     del frame_feat, frame_feat_norm, similarity_matrix, distance_matrix
@@ -183,10 +193,15 @@ def switch_tensor_order(tensors, order, dim=1):
     Returns:
         List of reordered tensors
     """
-    return [torch.index_select(tensor, dim, order) if tensor is not None else None for tensor in tensors]
+    return [
+        torch.index_select(tensor, dim, order) if tensor is not None else None
+        for tensor in tensors
+    ]
 
 
-def initialize_feature_extractors(max_query_num, det_thres=0.005, extractor_method="aliked", device="cuda"):
+def initialize_feature_extractors(
+    max_query_num, det_thres=0.005, extractor_method="aliked", device="cuda"
+):
     """
     Initialize feature extractors that can be reused based on a method string.
 
@@ -205,10 +220,14 @@ def initialize_feature_extractors(max_query_num, det_thres=0.005, extractor_meth
     for method in methods:
         method = method.strip()
         if method == "aliked":
-            aliked_extractor = ALIKED(max_num_keypoints=max_query_num, detection_threshold=det_thres)
+            aliked_extractor = ALIKED(
+                max_num_keypoints=max_query_num, detection_threshold=det_thres
+            )
             extractors["aliked"] = aliked_extractor.to(device).eval()
         elif method == "sp":
-            sp_extractor = SuperPoint(max_num_keypoints=max_query_num, detection_threshold=det_thres)
+            sp_extractor = SuperPoint(
+                max_num_keypoints=max_query_num, detection_threshold=det_thres
+            )
             extractors["sp"] = sp_extractor.to(device).eval()
         elif method == "sift":
             sift_extractor = SIFT(max_num_keypoints=max_query_num)
@@ -217,8 +236,12 @@ def initialize_feature_extractors(max_query_num, det_thres=0.005, extractor_meth
             print(f"Warning: Unknown feature extractor '{method}', ignoring.")
 
     if not extractors:
-        print(f"Warning: No valid extractors found in '{extractor_method}'. Using ALIKED by default.")
-        aliked_extractor = ALIKED(max_num_keypoints=max_query_num, detection_threshold=det_thres)
+        print(
+            f"Warning: No valid extractors found in '{extractor_method}'. Using ALIKED by default."
+        )
+        aliked_extractor = ALIKED(
+            max_num_keypoints=max_query_num, detection_threshold=det_thres
+        )
         extractors["aliked"] = aliked_extractor.to(device).eval()
 
     return extractors
@@ -253,7 +276,13 @@ def extract_keypoints(query_image, extractors, round_keypoints=True):
 
 
 def predict_tracks_in_chunks(
-    track_predictor, images_feed, query_points_list, fmaps_feed, fine_tracking, num_splits=None, fine_chunk=40960
+    track_predictor,
+    images_feed,
+    query_points_list,
+    fmaps_feed,
+    fine_tracking,
+    num_splits=None,
+    fine_chunk=40960,
 ):
     """
     Process a list of query points to avoid memory issues.
@@ -287,7 +316,11 @@ def predict_tracks_in_chunks(
     for split_points in query_points_list:
         # Feed into track predictor for each split
         fine_pred_track, _, pred_vis, pred_score = track_predictor(
-            images_feed, split_points, fmaps=fmaps_feed, fine_tracking=fine_tracking, fine_chunk=fine_chunk
+            images_feed,
+            split_points,
+            fmaps=fmaps_feed,
+            fine_tracking=fine_tracking,
+            fine_chunk=fine_chunk,
         )
         fine_pred_track_list.append(fine_pred_track)
         pred_vis_list.append(pred_vis)

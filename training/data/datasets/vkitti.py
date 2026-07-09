@@ -4,7 +4,6 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 import os.path as osp
 import logging
 import random
@@ -48,7 +47,7 @@ class VKittiDataset(BaseDataset):
         self.get_nearby = common_conf.get_nearby
         self.inside_random = common_conf.inside_random
         self.allow_duplicate_img = common_conf.allow_duplicate_img
-        
+
         self.expand_ratio = expand_ratio
         self.VKitti_DIR = VKitti_DIR
         self.min_num_images = min_num_images
@@ -59,23 +58,26 @@ class VKittiDataset(BaseDataset):
             self.len_train = len_test
         else:
             raise ValueError(f"Invalid split: {split}")
-        
+
         logging.info(f"VKitti_DIR is {self.VKitti_DIR}")
 
         # Load or generate sequence list
         txt_path = osp.join(self.VKitti_DIR, "sequence_list.txt")
         if osp.exists(txt_path):
-            with open(txt_path, 'r') as f:
+            with open(txt_path, "r") as f:
                 sequence_list = [line.strip() for line in f.readlines()]
         else:
-            # Generate sequence list and save to txt            
-            sequence_list = glob.glob(osp.join(self.VKitti_DIR, "*/*/*/rgb/*"))            
-            sequence_list = [file_path.split(self.VKitti_DIR)[-1].lstrip('/') for file_path in sequence_list]
+            # Generate sequence list and save to txt
+            sequence_list = glob.glob(osp.join(self.VKitti_DIR, "*/*/*/rgb/*"))
+            sequence_list = [
+                file_path.split(self.VKitti_DIR)[-1].lstrip("/")
+                for file_path in sequence_list
+            ]
             sequence_list = sorted(sequence_list)
 
             # Save to txt file
-            with open(txt_path, 'w') as f:
-                f.write('\n'.join(sequence_list))
+            with open(txt_path, "w") as f:
+                f.write("\n".join(sequence_list))
 
         self.sequence_list = sequence_list
         self.sequence_list_len = len(self.sequence_list)
@@ -118,16 +120,20 @@ class VKittiDataset(BaseDataset):
         # Load camera parameters
         try:
             camera_parameters = np.loadtxt(
-                osp.join(self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "extrinsic.txt"), 
-                delimiter=" ", 
-                skiprows=1
+                osp.join(
+                    self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "extrinsic.txt"
+                ),
+                delimiter=" ",
+                skiprows=1,
             )
             camera_parameters = camera_parameters[camera_parameters[:, 1] == camera_id]
 
             camera_intrinsic = np.loadtxt(
-                osp.join(self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "intrinsic.txt"), 
-                delimiter=" ", 
-                skiprows=1
+                osp.join(
+                    self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "intrinsic.txt"
+                ),
+                delimiter=" ",
+                skiprows=1,
             )
             camera_intrinsic = camera_intrinsic[camera_intrinsic[:, 1] == camera_id]
         except Exception as e:
@@ -137,7 +143,9 @@ class VKittiDataset(BaseDataset):
         num_images = len(camera_parameters)
 
         if ids is None:
-            ids = np.random.choice(num_images, img_per_seq, replace=self.allow_duplicate_img)
+            ids = np.random.choice(
+                num_images, img_per_seq, replace=self.allow_duplicate_img
+            )
 
         if self.get_nearby:
             ids = self.get_nearby_ids(ids, num_images, expand_ratio=self.expand_ratio)
@@ -154,15 +162,28 @@ class VKittiDataset(BaseDataset):
         original_sizes = []
 
         for image_idx in ids:
-            image_filepath = osp.join(self.VKitti_DIR, seq_name, f"rgb_{image_idx:05d}.jpg")
-            depth_filepath = osp.join(self.VKitti_DIR, seq_name, f"depth_{image_idx:05d}.png").replace("/rgb", "/depth")
+            image_filepath = osp.join(
+                self.VKitti_DIR, seq_name, f"rgb_{image_idx:05d}.jpg"
+            )
+            depth_filepath = osp.join(
+                self.VKitti_DIR, seq_name, f"depth_{image_idx:05d}.png"
+            ).replace("/rgb", "/depth")
 
             image = read_image_cv2(image_filepath)
-            depth_map = cv2.imread(depth_filepath, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+            depth_map = cv2.imread(
+                depth_filepath, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH
+            )
             depth_map = depth_map / 100
-            depth_map = threshold_depth_map(depth_map, max_percentile=-1, min_percentile=-1, max_depth=self.depth_max)
+            depth_map = threshold_depth_map(
+                depth_map,
+                max_percentile=-1,
+                min_percentile=-1,
+                max_depth=self.depth_max,
+            )
 
-            assert image.shape[:2] == depth_map.shape, f"Image and depth shape mismatch: {image.shape[:2]} vs {depth_map.shape}"
+            assert image.shape[:2] == depth_map.shape, (
+                f"Image and depth shape mismatch: {image.shape[:2]} vs {depth_map.shape}"
+            )
 
             original_size = np.array(image.shape[:2])
 
@@ -196,7 +217,9 @@ class VKittiDataset(BaseDataset):
             )
 
             if (image.shape[:2] != target_image_shape).any():
-                logging.error(f"Wrong shape for {seq_name}: expected {target_image_shape}, got {image.shape[:2]}")
+                logging.error(
+                    f"Wrong shape for {seq_name}: expected {target_image_shape}, got {image.shape[:2]}"
+                )
                 continue
 
             images.append(image)

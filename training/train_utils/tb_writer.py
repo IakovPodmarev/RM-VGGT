@@ -52,9 +52,7 @@ class TensorBoardLogger:
                 **kwargs,
             )
         else:
-            logging.debug(
-                f"Not logging on this process because rank {self._rank} != 0"
-            )
+            logging.debug(f"Not logging on this process because rank {self._rank} != 0")
 
         atexit.register(self.close)
 
@@ -109,11 +107,7 @@ class TensorBoardLogger:
         self._writer.add_scalar(name, data, global_step=step, new_style=True)
 
     def log_visuals(
-        self,
-        name: str,
-        data: Union[torch.Tensor, Any],
-        step: int,
-        fps: int = 4
+        self, name: str, data: Union[torch.Tensor, Any], step: int, fps: int = 4
     ) -> None:
         """Log image or video data to TensorBoard.
 

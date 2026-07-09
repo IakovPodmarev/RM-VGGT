@@ -5,7 +5,6 @@
 
 import os
 from typing import Callable, Optional
-import warnings
 
 from torch import Tensor, nn
 import torch.nn.functional as F
@@ -64,4 +63,9 @@ class SwiGLUFFNFused(SwiGLU):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         hidden_features = (int(hidden_features * 2 / 3) + 7) // 8 * 8
-        super().__init__(in_features=in_features, hidden_features=hidden_features, out_features=out_features, bias=bias)
+        super().__init__(
+            in_features=in_features,
+            hidden_features=hidden_features,
+            out_features=out_features,
+            bias=bias,
+        )

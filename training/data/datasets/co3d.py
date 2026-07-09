@@ -7,7 +7,6 @@
 import gzip
 import json
 import os.path as osp
-import os
 import logging
 
 import cv2
@@ -115,8 +114,7 @@ class Co3dDataset(BaseDataset):
         else:
             raise ValueError(f"Invalid split: {split}")
 
-        self.invalid_sequence = [] # set any invalid sequence names here
-
+        self.invalid_sequence = []  # set any invalid sequence names here
 
         self.category_map = {}
         self.data_store = {}
@@ -182,7 +180,7 @@ class Co3dDataset(BaseDataset):
         """
         if self.inside_random:
             seq_index = random.randint(0, self.sequence_list_len - 1)
-            
+
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
 
@@ -217,9 +215,9 @@ class Co3dDataset(BaseDataset):
                 depth_path = image_path.replace("/images", "/depths") + ".geometric.png"
                 depth_map = read_depth(depth_path, 1.0)
 
-                mvs_mask_path = image_path.replace(
-                    "/images", "/depth_masks"
-                ).replace(".jpg", ".png")
+                mvs_mask_path = image_path.replace("/images", "/depth_masks").replace(
+                    ".jpg", ".png"
+                )
                 mvs_mask = cv2.imread(mvs_mask_path, cv2.IMREAD_GRAYSCALE) > 128
                 depth_map[~mvs_mask] = 0
 

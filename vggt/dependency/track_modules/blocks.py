@@ -11,15 +11,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from functools import partial
-from typing import Callable
-import collections
-from torch import Tensor
-from itertools import repeat
 
 from .utils import bilinear_sampler
 
-from .modules import Mlp, AttnBlock, CrossAttnBlock, ResidualBlock
+from .modules import AttnBlock, CrossAttnBlock, ResidualBlock
 
 
 class BasicEncoder(nn.Module):
@@ -33,7 +28,14 @@ class BasicEncoder(nn.Module):
         self.norm1 = nn.InstanceNorm2d(self.in_planes)
         self.norm2 = nn.InstanceNorm2d(output_dim * 2)
 
-        self.conv1 = nn.Conv2d(input_dim, self.in_planes, kernel_size=7, stride=2, padding=3, padding_mode="zeros")
+        self.conv1 = nn.Conv2d(
+            input_dim,
+            self.in_planes,
+            kernel_size=7,
+            stride=2,
+            padding=3,
+            padding_mode="zeros",
+        )
         self.relu1 = nn.ReLU(inplace=True)
         self.layer1 = self._make_layer(output_dim // 2, stride=1)
         self.layer2 = self._make_layer(output_dim // 4 * 3, stride=2)
@@ -41,7 +43,11 @@ class BasicEncoder(nn.Module):
         self.layer4 = self._make_layer(output_dim, stride=2)
 
         self.conv2 = nn.Conv2d(
-            output_dim * 3 + output_dim // 4, output_dim * 2, kernel_size=3, padding=1, padding_mode="zeros"
+            output_dim * 3 + output_dim // 4,
+            output_dim * 2,
+            kernel_size=3,
+            padding=1,
+            padding_mode="zeros",
         )
         self.relu2 = nn.ReLU(inplace=True)
         self.conv3 = nn.Conv2d(output_dim * 2, output_dim, kernel_size=1)
@@ -106,7 +112,14 @@ class ShallowEncoder(nn.Module):
         elif self.norm_fn == "none":
             self.norm1 = nn.Sequential()
 
-        self.conv1 = nn.Conv2d(input_dim, self.in_planes, kernel_size=3, stride=2, padding=1, padding_mode="zeros")
+        self.conv1 = nn.Conv2d(
+            input_dim,
+            self.in_planes,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            padding_mode="zeros",
+        )
         self.relu1 = nn.ReLU(inplace=True)
 
         self.layer1 = self._make_layer(output_dim, stride=2)
@@ -143,13 +156,17 @@ class ShallowEncoder(nn.Module):
         tmp = None
         x = self.conv2(x) + x
 
-        x = F.interpolate(x, (H // self.stride, W // self.stride), mode="bilinear", align_corners=True)
+        x = F.interpolate(
+            x, (H // self.stride, W // self.stride), mode="bilinear", align_corners=True
+        )
 
         return x
 
 
 def _bilinear_intepolate(x, stride, H, W):
-    return F.interpolate(x, (H // stride, W // stride), mode="bilinear", align_corners=True)
+    return F.interpolate(
+        x, (H // stride, W // stride), mode="bilinear", align_corners=True
+    )
 
 
 class EfficientUpdateFormer(nn.Module):
@@ -180,13 +197,20 @@ class EfficientUpdateFormer(nn.Module):
         self.num_virtual_tracks = num_virtual_tracks
 
         if self.add_space_attn:
-            self.virual_tracks = nn.Parameter(torch.randn(1, num_virtual_tracks, 1, hidden_size))
+            self.virual_tracks = nn.Parameter(
+                torch.randn(1, num_virtual_tracks, 1, hidden_size)
+            )
         else:
             self.virual_tracks = None
 
         self.time_blocks = nn.ModuleList(
             [
-                AttnBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, attn_class=nn.MultiheadAttention)
+                AttnBlock(
+                    hidden_size,
+                    num_heads,
+                    mlp_ratio=mlp_ratio,
+                    attn_class=nn.MultiheadAttention,
+                )
                 for _ in range(time_depth)
             ]
         )
@@ -194,15 +218,30 @@ class EfficientUpdateFormer(nn.Module):
         if add_space_attn:
             self.space_virtual_blocks = nn.ModuleList(
                 [
-                    AttnBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, attn_class=nn.MultiheadAttention)
+                    AttnBlock(
+                        hidden_size,
+                        num_heads,
+                        mlp_ratio=mlp_ratio,
+                        attn_class=nn.MultiheadAttention,
+                    )
                     for _ in range(space_depth)
                 ]
             )
             self.space_point2virtual_blocks = nn.ModuleList(
-                [CrossAttnBlock(hidden_size, hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(space_depth)]
+                [
+                    CrossAttnBlock(
+                        hidden_size, hidden_size, num_heads, mlp_ratio=mlp_ratio
+                    )
+                    for _ in range(space_depth)
+                ]
             )
             self.space_virtual2point_blocks = nn.ModuleList(
-                [CrossAttnBlock(hidden_size, hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(space_depth)]
+                [
+                    CrossAttnBlock(
+                        hidden_size, hidden_size, num_heads, mlp_ratio=mlp_ratio
+                    )
+                    for _ in range(space_depth)
+                ]
             )
             assert len(self.time_blocks) >= len(self.space_virtual2point_blocks)
         self.initialize_weights()
@@ -240,16 +279,26 @@ class EfficientUpdateFormer(nn.Module):
             time_tokens = self.time_blocks[i](time_tokens)
 
             tokens = time_tokens.view(B, N, T, -1)  # (B N) T C -> B N T C
-            if self.add_space_attn and (i % (len(self.time_blocks) // len(self.space_virtual_blocks)) == 0):
-                space_tokens = tokens.permute(0, 2, 1, 3).contiguous().view(B * T, N, -1)  # B N T C -> (B T) N C
+            if self.add_space_attn and (
+                i % (len(self.time_blocks) // len(self.space_virtual_blocks)) == 0
+            ):
+                space_tokens = (
+                    tokens.permute(0, 2, 1, 3).contiguous().view(B * T, N, -1)
+                )  # B N T C -> (B T) N C
                 point_tokens = space_tokens[:, : N - self.num_virtual_tracks]
                 virtual_tokens = space_tokens[:, N - self.num_virtual_tracks :]
 
-                virtual_tokens = self.space_virtual2point_blocks[j](virtual_tokens, point_tokens, mask=mask)
+                virtual_tokens = self.space_virtual2point_blocks[j](
+                    virtual_tokens, point_tokens, mask=mask
+                )
                 virtual_tokens = self.space_virtual_blocks[j](virtual_tokens)
-                point_tokens = self.space_point2virtual_blocks[j](point_tokens, virtual_tokens, mask=mask)
+                point_tokens = self.space_point2virtual_blocks[j](
+                    point_tokens, virtual_tokens, mask=mask
+                )
                 space_tokens = torch.cat([point_tokens, virtual_tokens], dim=1)
-                tokens = space_tokens.view(B, T, N, -1).permute(0, 2, 1, 3)  # (B T) N C -> B N T C
+                tokens = space_tokens.view(B, T, N, -1).permute(
+                    0, 2, 1, 3
+                )  # (B T) N C -> B N T C
                 j += 1
 
         if self.add_space_attn:
@@ -262,7 +311,14 @@ class EfficientUpdateFormer(nn.Module):
 
 
 class CorrBlock:
-    def __init__(self, fmaps, num_levels=4, radius=4, multiple_track_feats=False, padding_mode="zeros"):
+    def __init__(
+        self,
+        fmaps,
+        num_levels=4,
+        radius=4,
+        multiple_track_feats=False,
+        padding_mode="zeros",
+    ):
         B, S, C, H, W = fmaps.shape
         self.S, self.C, self.H, self.W = S, C, H, W
         self.padding_mode = padding_mode
@@ -292,13 +348,19 @@ class CorrBlock:
 
             dx = torch.linspace(-r, r, 2 * r + 1)
             dy = torch.linspace(-r, r, 2 * r + 1)
-            delta = torch.stack(torch.meshgrid(dy, dx, indexing="ij"), axis=-1).to(coords.device)
+            delta = torch.stack(torch.meshgrid(dy, dx, indexing="ij"), axis=-1).to(
+                coords.device
+            )
 
             centroid_lvl = coords.reshape(B * S * N, 1, 1, 2) / 2**i
             delta_lvl = delta.view(1, 2 * r + 1, 2 * r + 1, 2)
             coords_lvl = centroid_lvl + delta_lvl
 
-            corrs = bilinear_sampler(corrs.reshape(B * S * N, 1, H, W), coords_lvl, padding_mode=self.padding_mode)
+            corrs = bilinear_sampler(
+                corrs.reshape(B * S * N, 1, H, W),
+                coords_lvl,
+                padding_mode=self.padding_mode,
+            )
             corrs = corrs.view(B, S, N, -1)
 
             out_pyramid.append(corrs)

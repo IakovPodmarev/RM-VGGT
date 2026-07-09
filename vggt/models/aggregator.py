@@ -7,9 +7,8 @@
 import logging
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from typing import Optional, Tuple, Union, List, Dict, Any
+from typing import Optional, Tuple, List
 
 from vggt.layers import PatchEmbed
 from vggt.layers.block import Block
@@ -72,10 +71,14 @@ class Aggregator(nn.Module):
     ):
         super().__init__()
 
-        self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
+        self.__build_patch_embed__(
+            patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim
+        )
 
         # Initialize rotary position embedding if frequency > 0
-        self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
+        self.rope = (
+            RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
+        )
         self.position_getter = PositionGetter() if self.rope is not None else None
 
         self.frame_blocks = nn.ModuleList(
@@ -121,14 +124,18 @@ class Aggregator(nn.Module):
 
         # Validate that depth is divisible by aa_block_size
         if self.depth % self.aa_block_size != 0:
-            raise ValueError(f"depth ({depth}) must be divisible by aa_block_size ({aa_block_size})")
+            raise ValueError(
+                f"depth ({depth}) must be divisible by aa_block_size ({aa_block_size})"
+            )
 
         self.aa_block_num = self.depth // self.aa_block_size
 
         # Note: We have two camera tokens, one for the first frame and one for the rest
         # The same applies for register tokens
         self.camera_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
-        self.register_token = nn.Parameter(torch.randn(1, 2, num_register_tokens, embed_dim))
+        self.register_token = nn.Parameter(
+            torch.randn(1, 2, num_register_tokens, embed_dim)
+        )
 
         # The patch tokens start after the camera and register tokens
         self.patch_start_idx = 1 + num_register_tokens
@@ -138,10 +145,15 @@ class Aggregator(nn.Module):
         nn.init.normal_(self.register_token, std=1e-6)
 
         # Register normalization constants as buffers
-        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
-            self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
+        for name, value in (
+            ("_resnet_mean", _RESNET_MEAN),
+            ("_resnet_std", _RESNET_STD),
+        ):
+            self.register_buffer(
+                name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False
+            )
 
-        self.use_reentrant = False # hardcoded to False
+        self.use_reentrant = False  # hardcoded to False
 
     def __build_patch_embed__(
         self,
@@ -161,7 +173,12 @@ class Aggregator(nn.Module):
         """
 
         if "conv" in patch_embed:
-            self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
+            self.patch_embed = PatchEmbed(
+                img_size=img_size,
+                patch_size=patch_size,
+                in_chans=3,
+                embed_dim=embed_dim,
+            )
         else:
             vit_models = {
                 "dinov2_vitl14_reg": vit_large,
@@ -222,13 +239,19 @@ class Aggregator(nn.Module):
 
         pos = None
         if self.rope is not None:
-            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
+            pos = self.position_getter(
+                B * S, H // self.patch_size, W // self.patch_size, device=images.device
+            )
 
         if self.patch_start_idx > 0:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
             pos = pos + 1
-            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
+            pos_special = (
+                torch.zeros(B * S, self.patch_start_idx, 2)
+                .to(images.device)
+                .to(pos.dtype)
+            )
             pos = torch.cat([pos_special, pos], dim=1)
 
         # update P because we added special tokens
@@ -241,12 +264,16 @@ class Aggregator(nn.Module):
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
-                    tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos
+                    tokens, frame_idx, frame_intermediates = (
+                        self._process_frame_attention(
+                            tokens, B, S, P, C, frame_idx, pos=pos
+                        )
                     )
                 elif attn_type == "global":
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos
+                    tokens, global_idx, global_intermediates = (
+                        self._process_global_attention(
+                            tokens, B, S, P, C, global_idx, pos=pos
+                        )
                     )
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
@@ -255,7 +282,9 @@ class Aggregator(nn.Module):
                 layer_idx = len(output_list)
                 if layer_idx in self.cached_layer_indices:
                     # concat frame and global intermediates, [B x S x P x 2C]
-                    concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
+                    concat_inter = torch.cat(
+                        [frame_intermediates[i], global_intermediates[i]], dim=-1
+                    )
                     output_list.append(concat_inter)
                 else:
                     output_list.append(None)
@@ -280,7 +309,12 @@ class Aggregator(nn.Module):
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
             if self.training:
-                tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
+                tokens = checkpoint(
+                    self.frame_blocks[frame_idx],
+                    tokens,
+                    pos,
+                    use_reentrant=self.use_reentrant,
+                )
             else:
                 tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
             frame_idx += 1
@@ -303,28 +337,33 @@ class Aggregator(nn.Module):
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
             if self.training:
-                tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
+                tokens = checkpoint(
+                    self.global_blocks[global_idx],
+                    tokens,
+                    pos,
+                    use_reentrant=self.use_reentrant,
+                )
             else:
                 tokens = self.global_blocks[global_idx](tokens, pos=pos)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
-        return tokens, global_idx, intermediates 
+        return tokens, global_idx, intermediates
 
 
-def slice_expand_and_flatten(token_tensor, B, S): 
-    """ 
-    Processes specialized tokens with shape (1, 2, X, C) for multi-frame processing: 
-    1) Uses the first position (index=0) for the first frame only 
-    2) Uses the second position (index=1) for all remaining frames (S-1 frames) 
-    3) Expands both to match batch size B 
+def slice_expand_and_flatten(token_tensor, B, S):
+    """
+    Processes specialized tokens with shape (1, 2, X, C) for multi-frame processing:
+    1) Uses the first position (index=0) for the first frame only
+    2) Uses the second position (index=1) for all remaining frames (S-1 frames)
+    3) Expands both to match batch size B
     4) Concatenates to form (B, S, X, C) where each sequence has 1 first-position token
-       followed by (S-1) second-position tokens 
-    5) Flattens to (B*S, X, C) for processing 
+       followed by (S-1) second-position tokens
+    5) Flattens to (B*S, X, C) for processing
 
     Returns:
-        torch.Tensor: Processed tokens with shape (B*S, X, C) 
-    """ 
+        torch.Tensor: Processed tokens with shape (B*S, X, C)
+    """
 
     # Slice out the "query" tokens => shape (1, 1, ...)
     query = token_tensor[:, 0:1, ...].expand(B, 1, *token_tensor.shape[2:])
