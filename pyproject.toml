@@ -40,18 +40,19 @@ include = ["vggt*"]
 # Pixi configuration
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = [{ platform = "linux-64", cuda = "12.2" }]
 
-[tool.pixi.system-requirements]
-cuda = "12.4"
+[tool.pixi.feature.test.pypi-dependencies]
+hydra-core = "*"
+omegaconf = "*"
+
+[tool.pixi.environments]
+default = { features = ["info", "test"] }
+demo = { features = ["demo"] }
 
 [tool.pixi.pypi-dependencies]
 onnx = ">=1.16.0, <2"
 torchviz = ">=0.0.2, <0.1"
-
-[tool.pixi.environments]
-default = { features = ["info"] }
-demo = { features = ["demo"] }
 
 [tool.pixi.tasks]
 
@@ -62,7 +63,7 @@ pillow = ">=8,<12"
 markupsafe = ">=2,<3"
 pytorch-gpu = "*"
 torchvision = "*"
-cuda-version = "12.4.*"
+cuda-version = "12.2.*"
 graphviz = "*"
 setuptools = ">=82.0.1,<83"
 pip = ">=26.1.1,<27"

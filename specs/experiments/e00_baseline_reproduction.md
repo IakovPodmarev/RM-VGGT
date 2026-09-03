@@ -4,6 +4,11 @@
 
 `E00_baseline_reproduction`
 
+## Status
+
+
+E00 established a local, non-recurrent training-pipeline baseline using controlled synthetic tensors. It does not claim real-dataset validation, full pretrained-model reproduction, or reproduction of published VGGT metrics.
+
 ## Research question
 
 Can we establish a trustworthy VGGT baseline in this repository before any recurrent-memory changes are introduced?
@@ -161,3 +166,61 @@ Because the current repo config may describe fine-tuning rather than full paper 
 - not necessarily full paper-metric reproduction
 
 ## Loss
+
+The accepted E00 training smoke uses the existing `MultitaskLoss` without modification:
+
+- camera loss enabled
+- depth loss enabled
+- point loss disabled
+- track loss disabled
+
+The trainer receives the existing loss dictionary and backpropagates its `objective` value. E00 introduces no auxiliary loss and no memory-related objective.
+
+## Accepted baseline configuration
+
+The E00 reference configuration is `training/config/e00b_training_pipeline_one_sample.yaml` together with the controlled test model and synthetic sequence fixture in `tests/training/test_e00b_pipeline.py`.
+
+The reference behavior is:
+
+- memory and recurrence absent
+- camera and depth branches enabled
+- point and tracking branches disabled
+- patch feature extractor frozen
+- remaining aggregator, camera-head, and depth-head paths trainable
+- one controlled batch passed through preprocessing, forward, loss, backward, and optimizer update
+
+The small synthetic model used by the test is a pipeline contract, not a quality or throughput benchmark for the released full-size model.
+
+## Validation state
+
+The synthetic-tensor baseline was tested by the project owner. The accepted E00 evidence covers:
+
+- Hydra configuration loading
+- dataloader batch construction and expected tensor shapes
+- baseline camera and depth prediction keys and shapes
+- finite camera and depth losses
+- backward propagation through frame attention, global attention, camera head, and depth head
+- absence of gradients in the frozen patch feature extractor
+- successful optimizer update
+- disabled point and tracking heads
+
+This is sufficient for the purpose of E00: confirming that the local non-recurrent training path is structurally usable before memory-specific work begins.
+
+## Dataset-adapter decision
+
+Real CO3D and VKITTI adapter validation is intentionally not part of E00 closure.
+
+The current classes derived from `BaseDataset` are inherited transitional code. They will be rewritten as part of the next memory-token experiment.
+
+Testing the current derived dataset classes would validate interfaces that are expected to be replaced and would not provide a durable acceptance criterion. Their implementation and validation are therefore deferred together.
+
+
+## E00 outcome
+
+E00 is closed as a **local training-pipeline baseline**, with the following interpretation:
+
+- the original VGGT token layout and head interfaces remain unchanged
+- the camera/depth loss and optimizer path can execute end to end on a controlled synthetic batch
+- no recurrent state or memory mechanism is present
+- no real-dataset, checkpoint-quality, or paper-metric claim is made
+- concrete dataset-adapter design and real-data validation move to the next memory-token experiment

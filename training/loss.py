@@ -584,9 +584,7 @@ def point_map_to_normal(point_map, mask, eps=1e-6):
     Returns:
         normals: (4, B, H, W, 3) normal vectors for each of the 4 cross-product directions
         valids: (4, B, H, W) corresponding valid masks
-    """                             
-Scene20/15-deg-left/extrinsic.txt                                                                                                  
-Scene20/15-deg-left/info.txt                                                           
+    """                                                                              
     with torch.cuda.amp.autocast(enabled=False):
         # Pad inputs to avoid boundary issues
         padded_mask = F.pad(mask, (1, 1, 1, 1), mode="constant", value=0)
