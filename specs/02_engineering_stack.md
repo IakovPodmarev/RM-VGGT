@@ -10,7 +10,6 @@ Fix the project-wide engineering conventions so experiments remain consistent.
 - CLI: `argparse`
 - config: Hydra / OmegaConf
 - tests: `pytest`
-- lint / format: `pre-commit`, `ruff`
 - experiment logging: Weights & Biases
 
 Do not introduce new infrastructure unless clearly necessary.

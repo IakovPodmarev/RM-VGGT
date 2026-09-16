@@ -1,0 +1,28 @@
+defaults:
+  - default_dataset.yaml
+  - _self_
+
+exp_name: e01a
+img_size: 518
+accum_steps: 1
+max_img_per_gpu: 1
+batch_size: 1
+episode_batch_size: 1
+
+e01a:
+  experiment_id: E01a
+  total_frames: 24
+  segment_frames: 8
+  num_segments: 3
+  backprop_mode: full
+  memory_enabled: true
+  frozen_aggregator: true
+  batch_size: 1
+  episode_batch_size: 1
+
+model:
+  enable_camera: true
+  enable_depth: true
+  enable_point: false
+  enable_track: false
+

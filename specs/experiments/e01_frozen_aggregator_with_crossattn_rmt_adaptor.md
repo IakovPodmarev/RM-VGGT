@@ -310,11 +310,12 @@ allowing each memory slot to overwrite obsolete information. Camera slots are
 gated against corresponding camera read slots, and patch slots against
 corresponding patch read slots.
 
-The keep-gate output projection weight is initialized to zero and its bias to
-`+1.0`, giving an initial keep probability of approximately `0.33`. This
-provides a stable identity path without making overmemorizing initially
-negligible. Camera and patch slots use the same initialization but independent
-per-token gate values.
+The keep-gate output projection weight is initialized to zero and its bias to approximately
+-0.708, giving an initial keep probability of 0.33. This biases the recurrent state toward the
+current segment: initially, each update retains roughly one-third of the previous memory and
+writes roughly two-thirds of the new candidate. The model can still learn longer retention
+where useful. Camera and patch slots use the same initialization but produce independent per-
+token gate values.
 
 ## Camera read adaptor
 
@@ -716,3 +717,4 @@ E01a must preserve the following:
 - Memory replay backpropagation, truncated BPTT, a different coordinate
   normalization policy, or a different segment schedule requires a subsequent
   experiment identifier such as `E01b`; none is defined here.
+
