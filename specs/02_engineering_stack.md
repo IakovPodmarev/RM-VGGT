@@ -44,6 +44,32 @@ Each experiment should specify the relevant subset of:
 - memory reset/detach test
 - checkpoint-load test
 
+## Experiment naming convention
+
+Experiment identifiers such as `E00`, `E01`, and `E01a` may appear only in:
+
+- specifications under `specs/`
+- experiment configuration files and values under `training/config/`
+- tests under `tests/`, including test file names, test names, fixtures, and
+  assertions
+
+Production code must use capability-based names that remain meaningful outside
+one experiment. Experiment identifiers must not appear in production source
+file or directory names, module names, class or function names, variables,
+comments, docstrings, error messages, or runtime branching logic.
+
+For example:
+
+- allowed test: `tests/training/test_e01a_memory_writer.py`
+- allowed config: `training/config/e01a_frozen_aggregator_streaming.yaml`
+- preferred production module: `vggt/recurrent_memory/segment_model.py`
+- preferred production class: `RecurrentMemorySegmentModel`
+- prohibited production names: `e01a_segment_model.py`, `E01aSegmentModel`, or
+  `if "e01a" in config`
+
+Experiment-specific behavior must be selected through generic capability
+settings in configuration rather than hard-coded experiment-name checks.
+
 ## Logging rules
 
 Every serious run should log:

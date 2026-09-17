@@ -25,7 +25,7 @@ from loss import MultitaskLoss
 from train_utils.freeze import freeze_modules
 from train_utils.optimizer import construct_optimizers
 from trainer import Trainer
-from vggt.models.vggt import VGGT
+from vggt.models.RMVGGT import VGGT
 
 
 class DummySequenceDataset(BaseDataset):
