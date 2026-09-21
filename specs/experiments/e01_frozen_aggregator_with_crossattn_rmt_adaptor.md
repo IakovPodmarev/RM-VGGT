@@ -384,7 +384,7 @@ aggregator output features, incoming m[t]
     -> outgoing m[t+1]
 ```
 
-The implementation should preserve three explicit boundaries:
+The implementation should preserve four explicit boundaries:
 
 ```python
 normalize_segment(raw_segment_batch) -> normalized_segment_batch
@@ -396,18 +396,33 @@ forward_segment(
     images,
     patch_start_idx,
     read_memory,
-) -> (predictions, next_memory)
+) -> (predictions, next_memory, diagnostics)
+
+forward(images, read_memory) -> (predictions, next_memory, diagnostics)
 ```
 
 `normalize_segment` is a data/trainer concern and operates on CPU tensors from
 one segment only. `encode_segment` owns the frozen-aggregator boundary.
 `forward_segment` owns all trainable E01 modules and must not call backward or
-the optimizer.
+the optimizer. The model's standard `forward` method composes `encode_segment`
+and `forward_segment` for exactly one already-normalized segment; incoming
+memory remains an explicit required argument.
 
-The sequence orchestrator accepts an ordered episode of three raw segments,
-creates the learned initial memory, invokes these interfaces in order, and
-returns the three prediction/loss dictionaries plus final memory for logging or
-continued inference. Training policy remains outside the segment model.
+The recurrent sequence orchestrator does not accept raw frames and does not
+split, normalize, or transfer data. It consumes exactly three ordered,
+independently normalized segment mappings yielded by the outer episode
+pipeline. Each yielded segment contains `images` shaped `[B, 8, 3, H, W]` on
+its final device and in its final dtype. The orchestrator creates the learned
+initial memory once, invokes the model through its standard module call for
+each segment in order, and returns the three prediction and diagnostic
+dictionaries plus memory states `m[0]` through `m[3]`. It must not calculate
+losses, call backward, or perform optimizer operations.
+
+Production preprocessing yields prepared segments just in time. Unit tests may
+materialize the three prepared mappings in a list, but the training path must
+not normalize or copy all three segments to the accelerator before segment 0
+is processed. Training and loss-aggregation policy remain outside the segment
+model and sequence orchestrator.
 
 Camera and depth branch inputs are separate views of the cached feature list.
 The camera branch replaces only the final camera-token features with its
@@ -452,9 +467,11 @@ must tolerate the coordinate reset without receiving a future-derived
 alignment transform. Predictions from separate segments are evaluated in their
 own normalized frames and are not directly concatenated into one trajectory.
 
-The implementation may receive all 24 raw frames from the current dataloader
-in one CPU batch for compatibility, but it must expose them to preprocessing
-and the model through the ordered segment loop above. A test must prove that
+The outer episode pipeline may receive all 24 raw frames from the current
+dataloader in one CPU batch for compatibility. It splits that CPU episode
+first, then prepares and yields only the current segment to the recurrent
+orchestrator. Splitting, segment-local normalization, and device transfer stay
+outside the orchestrator and occur just in time. A test must prove that
 changing frames `8..23` cannot change normalized data, features, predictions,
 or loss for segment 0.
 
@@ -717,4 +734,3 @@ E01a must preserve the following:
 - Memory replay backpropagation, truncated BPTT, a different coordinate
   normalization policy, or a different segment schedule requires a subsequent
   experiment identifier such as `E01b`; none is defined here.
-

@@ -7,9 +7,9 @@ from torch import Tensor, nn
 
 import vggt.models.RMVGGT as rmvggt_module
 from vggt.models.RMVGGT import RMVGGT
-from vggt.recurrent_memory.camera_read_adaptor import CameraReadAdaptor
-from vggt.recurrent_memory.depth_read_adaptor import DepthReadAdaptor
-from vggt.recurrent_memory.memory_writer import MemoryWriter
+from vggt.rm_adaptor.camera_read_adaptor import CameraReadAdaptor
+from vggt.rm_adaptor.depth_read_adaptor import DepthReadAdaptor
+from vggt.rm_adaptor.memory_writer import MemoryWriter
 
 
 class _FakeAggregator(nn.Module):

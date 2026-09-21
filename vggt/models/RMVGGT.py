@@ -8,9 +8,9 @@ from torch import Tensor, nn
 from vggt.heads.camera_head import CameraHead
 from vggt.heads.dpt_head import DPTHead
 from vggt.models.aggregator import Aggregator
-from vggt.recurrent_memory.camera_read_adaptor import CameraReadAdaptor
-from vggt.recurrent_memory.depth_read_adaptor import DepthReadAdaptor
-from vggt.recurrent_memory.memory_writer import MemoryWriter
+from vggt.rm_adaptor.camera_read_adaptor import CameraReadAdaptor
+from vggt.rm_adaptor.depth_read_adaptor import DepthReadAdaptor
+from vggt.rm_adaptor.memory_writer import MemoryWriter
 
 
 class RMVGGT(nn.Module):
@@ -118,6 +118,35 @@ class RMVGGT(nn.Module):
         if not isinstance(cached_features, list) or len(cached_features) <= 23:
             raise ValueError("aggregator cache must contain layer 23")
         return cached_features, patch_start_idx
+
+    def forward(
+        self,
+        images: Tensor,
+        read_memory: Tensor,
+    ) -> tuple[dict[str, Tensor | list[Tensor]], Tensor, dict[str, Tensor]]:
+        """Process one prepared segment using explicitly supplied memory.
+
+        Args:
+            images: Prepared segment images shaped ``[B, S, 3, H, W]``.
+            read_memory: Incoming recurrent state for this segment.
+
+        Returns:
+            Prediction mapping, outgoing recurrent state, and diagnostics from
+            the lower-level segment computation.
+
+        Invariants:
+            This public boundary encodes exactly one segment and delegates its
+            trainable computation to ``forward_segment``. It neither creates,
+            stores, detaches, nor mutates recurrent memory, and performs no
+            normalization, device transfer, loss, backward, or optimizer work.
+        """
+        cached_features, patch_start_idx = self.encode_segment(images)
+        return self.forward_segment(
+            cached_features,
+            images,
+            patch_start_idx,
+            read_memory,
+        )
 
     def forward_segment(self, cached_features: list[Tensor | None], images: Tensor, patch_start_idx: int, read_memory: Tensor) -> tuple[dict[str, Tensor | list[Tensor]], Tensor, dict[str, Tensor]]:
         """Predict one segment and return outgoing memory plus gate diagnostics.

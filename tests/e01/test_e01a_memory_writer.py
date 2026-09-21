@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vggt.recurrent_memory.memory_writer import MemoryWriter
+from vggt.rm_adaptor.memory_writer import MemoryWriter
 
 
 def _small_writer(**overrides: int) -> MemoryWriter:

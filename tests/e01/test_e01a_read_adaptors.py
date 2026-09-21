@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vggt.recurrent_memory.camera_read_adaptor import CameraReadAdaptor
-from vggt.recurrent_memory.depth_read_adaptor import DepthReadAdaptor
+from vggt.rm_adaptor.camera_read_adaptor import CameraReadAdaptor
+from vggt.rm_adaptor.depth_read_adaptor import DepthReadAdaptor
 
 
 def _small_adaptors() -> tuple[CameraReadAdaptor, DepthReadAdaptor]:
