@@ -6,7 +6,9 @@
 
 import logging
 import itertools
-from typing import Any, Dict, List, Mapping, Iterable, Set, Union
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Iterable, Sequence, Set, Union
 
 import hydra
 import torch
@@ -17,6 +19,27 @@ from torch import Tensor
 # Optimizer wrapper
 # -----------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ParameterGroupSpec:
+    """Describe one explicitly selected optimizer parameter group.
+
+    Attributes:
+        name: Capability-oriented label for reporting and validation errors.
+        parameter_names: Fully qualified names of the exact parameters in order.
+        parameters: The corresponding parameter objects in the same order.
+        optimizer_options: Generic per-group options such as a finite positive ``lr``.
+
+    Invariants:
+        The names and parameters have equal length. The object retains names so
+        callers can diagnose missing, frozen, duplicate, or unexpected members
+        without relying on parameter object representations.
+    """
+
+    name: str
+    parameter_names: tuple[str, ...]
+    parameters: tuple[nn.Parameter, ...]
+
+    optimizer_options: Mapping[str, Any]
 
 class OptimizerWrapper:
     """Wraps a torch.optim.Optimizer and its schedulers (if any)."""
@@ -55,6 +78,93 @@ class OptimizerWrapper:
         for i, param_group in enumerate(self.optimizer.param_groups):
             for option, scheduler in self.schedulers[i].items():
                 param_group[option] = scheduler(where)
+
+
+
+def construct_optimizer_for_component_groups(
+    model: nn.Module,
+    optimizer_conf: Any,
+    parameter_groups: Sequence[ParameterGroupSpec],
+    *,
+    schedulers: Sequence[Mapping[str, Any]] | None = None,
+) -> OptimizerWrapper:
+    """Construct an optimizer from explicit capability-oriented parameter groups.
+
+    Args:
+        model: Module whose named parameters define the complete trainable set.
+        optimizer_conf: Hydra-instantiable optimizer configuration.
+        parameter_groups: Ordered specifications retaining exact parameter names
+            for reporting and generic per-group options. ``name`` and ``params``
+            are reserved for the builder-created PyTorch group.
+        schedulers: Optional per-group progress schedulers for optimizer options.
+
+    Returns:
+        An optimizer wrapper owning the instantiated underlying optimizer and
+        the supplied progress schedulers.
+
+    Raises:
+
+        ValueError: If a group name repeats; a group is empty; names and
+            parameters do not agree; options contain reserved keys or an absent,
+            nonnumeric, nonfinite, or nonpositive learning rate; groups overlap;
+            frozen parameters are selected; or a trainable parameter is uncovered.
+    Invariants:
+        Every selected parameter appears exactly once, every trainable model
+        parameter is selected, and parameters with ``requires_grad=False`` are
+        excluded. Scheduler evaluation is driven solely by the caller-supplied
+        normalized progress value and has no independent progress state.
+    """
+    if not parameter_groups:
+        raise ValueError("parameter groups must not be empty")
+    named = dict(model.named_parameters())
+    selected: set[nn.Parameter] = set()
+    group_names: set[str] = set()
+    torch_groups = []
+    for spec in parameter_groups:
+        if spec.name in group_names:
+            raise ValueError(f"duplicate optimizer group name: {spec.name}")
+        group_names.add(spec.name)
+        if not spec.parameters:
+            raise ValueError(f"optimizer group {spec.name} is empty")
+        if len(spec.parameter_names) != len(spec.parameters):
+            raise ValueError(f"optimizer group {spec.name} names and parameters differ")
+        options = dict(spec.optimizer_options)
+        if {"name", "params"} & options.keys():
+            raise ValueError(f"optimizer group {spec.name} options contain reserved key")
+        lr = options.get("lr")
+        if not isinstance(lr, (int, float)) or isinstance(lr, bool) or not math.isfinite(lr) or lr <= 0:
+            raise ValueError(f"optimizer group {spec.name} lr must be finite and positive")
+        for name, parameter in zip(spec.parameter_names, spec.parameters):
+            if named.get(name) is not parameter or not parameter.requires_grad or parameter in selected:
+                raise ValueError(f"invalid optimizer parameter {name} in group {spec.name}")
+            selected.add(parameter)
+        torch_groups.append({"name": spec.name, "params": list(spec.parameters), **options})
+    trainable = {parameter for parameter in named.values() if parameter.requires_grad}
+    if selected != trainable:
+        missing = [name for name, parameter in named.items() if parameter in trainable - selected]
+        raise ValueError(f"uncovered trainable parameters: {missing}")
+    if schedulers is not None and len(schedulers) != len(torch_groups):
+        raise ValueError("scheduler mappings must align with parameter groups")
+    return OptimizerWrapper(hydra.utils.instantiate(optimizer_conf, torch_groups), schedulers)
+
+
+def build_recurrent_parameter_group_specs(model: nn.Module, learning_rates: Mapping[str, Any]) -> list[ParameterGroupSpec]:
+    """Select recurrent-memory and prediction-head parameters from configured rates."""
+    prefixes = {
+        "recurrent_memory": ("memory_writer.", "camera_read_adaptor.", "depth_read_adaptor."),
+        "prediction_heads": ("camera_head.", "depth_head."),
+    }
+    named = dict(model.named_parameters())
+    specs = []
+    for name, group_prefixes in prefixes.items():
+        if name not in learning_rates:
+            raise ValueError(f"learning_rates is missing {name}")
+        names = tuple(key for key, value in named.items() if value.requires_grad and key.startswith(group_prefixes))
+        if not names:
+            raise ValueError(f"optimizer group {name} is empty")
+        specs.append(ParameterGroupSpec(name, names, tuple(named[key] for key in names), {"lr": learning_rates[name]}))
+    return specs
+
 
 
 # -----------------------------------------------------------------------------
@@ -284,6 +394,18 @@ def construct_optimizers(
     if optim_conf is None:
         return None
 
+    if hasattr(optim_conf, "learning_rates"):
+        specs = build_recurrent_parameter_group_specs(model, optim_conf.learning_rates)
+        warmup = float(optim_conf.scheduler.warmup_fraction)
+        schedulers = []
+        for spec in specs:
+            peak = spec.optimizer_options["lr"]
+            def schedule(progress, peak=peak, warmup=warmup):
+                if progress <= warmup:
+                    return peak * progress / warmup
+                return peak * 0.5 * (1.0 + math.cos(math.pi * (progress - warmup) / (1.0 - warmup)))
+            schedulers.append({"lr": schedule})
+        return [construct_optimizer_for_component_groups(model, optim_conf.optimizer, specs, schedulers=schedulers)]
     optimizer = construct_optimizer(
         model,
         optim_conf.optimizer,

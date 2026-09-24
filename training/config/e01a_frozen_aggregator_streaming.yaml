@@ -37,3 +37,23 @@ loss:
     valid_range: 0.98
   point: null
   track: null
+
+optim:
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.05
+  amp:
+    enabled: true
+    amp_dtype: bfloat16
+  gradient_clip:
+    _target_: train_utils.gradient_clip.GradientClipper
+    configs:
+      - module_name: [memory_writer, camera_read_adaptor, depth_read_adaptor, camera_head, depth_head]
+        max_norm: 1.0
+        norm_type: 2
+  learning_rates:
+    recurrent_memory: 1.0e-4
+    prediction_heads: 5.0e-5
+  scheduler:
+    warmup_fraction: 0.05
+    type: cosine

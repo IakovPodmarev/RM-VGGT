@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import Tensor, nn
 
+from training.recurrent_sequence import run_recurrent_sequence
 import vggt.models.RMVGGT as rmvggt_module
 from vggt.models.RMVGGT import RMVGGT
 from vggt.rm_adaptor.camera_read_adaptor import CameraReadAdaptor
@@ -257,3 +259,39 @@ def test_e01a_rmvggt_passes_configured_patch_size_to_default_depth_head(monkeypa
     RMVGGT(aggregator, _FakeCameraHead(), None, writer, camera_adaptor, depth_adaptor, patch_size=2, embed_dim=4)
 
     assert seen["patch_size"] == 2
+
+
+@pytest.mark.parametrize("low_precision_cache", [False, True])
+def test_e01a_autocast_preserves_memory_cache_dtype_across_segments(low_precision_cache: bool) -> None:
+    """Frozen cache and recurrent states agree for either aggregator output dtype."""
+    if not torch.amp.autocast_mode.is_autocast_available("cpu"):
+        pytest.skip("CPU bfloat16 autocast is unavailable")
+    model, aggregator, _, _ = _model()
+    if low_precision_cache:
+        original_forward = aggregator.forward
+
+        def low_precision_forward(images: Tensor) -> tuple[list[Tensor | None], int]:
+            """Emulate an aggregator that emits reduced-precision cache entries."""
+            cache, patch_start = original_forward(images)
+            return [entry.to(torch.bfloat16) if entry is not None else None for entry in cache], patch_start
+
+        aggregator.forward = low_precision_forward
+    images = torch.randn(1, 2, 3, 4, 4)
+    segments = [{"images": images} for _ in range(3)]
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        sequence = run_recurrent_sequence(model, segments, num_segments=3, segment_frames=2)
+        cache, _ = model.encode_segment(images)
+        assert all(entry is None or entry.dtype == images.dtype for entry in cache)
+    assert all(state.dtype == images.dtype for state in sequence.memory_states)
+    assert all(parameter.grad is None for parameter in aggregator.parameters())
+
+
+def test_e01a_autocast_rejects_mismatched_recurrent_memory_dtype() -> None:
+    """Autocast does not waive the strict memory-to-cache dtype requirement."""
+    model, _, _, _ = _model()
+    images = torch.randn(1, 2, 3, 4, 4)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        cache, patch_start = model.encode_segment(images)
+        memory = model.initial_memory(1, device=images.device, dtype=torch.float64)
+        with pytest.raises(ValueError, match="dtype"):
+            model.forward_segment(cache, images, patch_start, memory)

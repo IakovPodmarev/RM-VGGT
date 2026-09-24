@@ -80,7 +80,10 @@ class RMVGGT(nn.Module):
             raise ValueError("read_memory shape is incompatible with memory writer")
         if layer23.device != images.device or read_memory.device != layer23.device:
             raise ValueError("cache, images, and read_memory device must match")
-        if layer23.dtype != images.dtype or read_memory.dtype != layer23.dtype:
+        autocast_active = layer23.device.type in {"cpu", "cuda"} and torch.is_autocast_enabled(layer23.device.type)
+        if read_memory.dtype != layer23.dtype:
+            raise ValueError("cache, images, and read_memory dtype must match")
+        if not autocast_active and layer23.dtype != images.dtype:
             raise ValueError("cache, images, and read_memory dtype must match")
         for name, module in (
             ("memory_writer", self.memory_writer),
@@ -94,7 +97,7 @@ class RMVGGT(nn.Module):
                 continue
             if layer23.device != parameter.device:
                 raise ValueError(f"cache device must match {name} parameters")
-            if layer23.dtype != parameter.dtype:
+            if not autocast_active and layer23.dtype != parameter.dtype:
                 raise ValueError(f"cache dtype must match {name} parameters")
         return layer23
 
@@ -105,7 +108,10 @@ class RMVGGT(nn.Module):
             images: Already-normalized segment shaped ``[B, S, 3, H, W]``.
 
         Returns:
-            Sparse cached feature list and patch-token start index.
+            Sparse cached feature list and patch-token start index. During
+            autocast, frozen features use the prepared image dtype so the
+            initial and subsequent recurrent states match the cache without
+            changing prepared images or casting memory between segments.
 
         Raises:
             ValueError: If image rank or aggregator cache structure is invalid.
@@ -117,6 +123,9 @@ class RMVGGT(nn.Module):
             cached_features, patch_start_idx = self.aggregator(images)
         if not isinstance(cached_features, list) or len(cached_features) <= 23:
             raise ValueError("aggregator cache must contain layer 23")
+        if images.device.type in {"cpu", "cuda"} and torch.is_autocast_enabled(images.device.type):
+            cached_features = [feature.to(dtype=images.dtype) if feature is not None else None
+                               for feature in cached_features]
         return cached_features, patch_start_idx
 
     def forward(
