@@ -5,6 +5,7 @@ dependencies = [
     "pillow",
     "huggingface-hub",
     "einops",
+    "wandb",
     "safetensors",
     "opencv-python", "iopath>=0.1.10,<0.2", "wcmatch>=10.2.1,<11",
 ]

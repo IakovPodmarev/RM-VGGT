@@ -1,8 +1,12 @@
 defaults:
-  - default_dataset.yaml
   - _self_
 
 exp_name: e01a
+experiment_id: ${e01a.experiment_id}
+trainer_target: recurrent_trainer.RecurrentTrainer
+device: cuda
+seed_value: 42
+max_epochs: 20
 img_size: 518
 accum_steps: 1
 max_img_per_gpu: 1
@@ -20,7 +24,39 @@ e01a:
   batch_size: 1
   episode_batch_size: 1
 
+sequence:
+  total_frames: ${e01a.total_frames}
+  segment_frames: ${e01a.segment_frames}
+  num_segments: ${e01a.num_segments}
+  backprop_mode: ${e01a.backprop_mode}
+
+training:
+  max_episodes_per_epoch: 800
+  episode_batch_size: 1
+  accum_steps: 1
+  scheduled_updates: 16000
+
+validation:
+  max_episodes_per_epoch: 400
+
+episode_sources:
+  train: null
+  validation: null
+
+dataset_split:
+  train: [Scene01, Scene02, Scene06, Scene18]
+  validation: [Scene20]
+
+memory:
+  enabled: true
+  read_slots_per_type: 8
+  width: 512
+  writer_keep_gate_initial: 0.33
+  adaptor_residual_gate_initial: 0.1
+
 model:
+  _target_: vggt.models.RMVGGT.RMVGGT
+  img_size: ${img_size}
   enable_camera: true
   enable_depth: true
   enable_point: false
@@ -57,3 +93,13 @@ optim:
   scheduler:
     warmup_fraction: 0.05
     type: cosine
+
+logging:
+  mode: online
+  project: rm-vggt
+  run_name: ${exp_name}
+
+checkpoint:
+  save_dir: logs/${exp_name}/ckpts
+  resume_checkpoint_path: null
+  pretrained_checkpoint_path: null

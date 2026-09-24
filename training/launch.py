@@ -1,52 +1,73 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+"""Argparse launch for configured training capabilities."""
 
 import argparse
+from pathlib import Path
+import sys
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 from data.episode import validate_segment_dimensions
-from hydra import initialize, compose
+from hydra import compose, initialize
+from hydra.utils import get_class
 from omegaconf import DictConfig
 from trainer import Trainer
 
 
 def load_config(config_name: str, overrides: list[str] | None = None) -> DictConfig:
-    """Compose and validate a launch configuration before trainer construction.
+    """Compose launch config and validate any generic recurrent schedule.
 
     Args:
-        config_name: Hydra config name without the ``.yaml`` extension.
-        overrides: Optional Hydra override expressions applied during composition.
+        config_name: Config filename without extension.
+        overrides: Optional Hydra override expressions.
 
     Returns:
-        The composed configuration after experiment-specific validation.
+        The composed, unresolved DictConfig, preserving ordinary config
+        loading behavior and interpolation.
 
     Raises:
-        ValueError: If E01a streaming dimensions are inconsistent.
-        hydra.errors.HydraException: If Hydra cannot compose the requested config.
-
-    Invariants:
-        E01a dimensions are validated immediately after composition and before
-        ``Trainer`` construction. Configurations without the E01a section
-        retain their existing composition behavior.
+        ValueError: If configured sequence dimensions do not partition.
+        hydra.errors.HydraException: If composition fails.
     """
     with initialize(version_base=None, config_path="config"):
         cfg = compose(config_name=config_name, overrides=overrides or [])
-
-    if "e01a" in cfg:
-        e01a = cfg.e01a
+    if "sequence" in cfg:
+        sequence = cfg.sequence
         validate_segment_dimensions(
-            total_frames=e01a.total_frames,
-            segment_frames=e01a.segment_frames,
-            num_segments=e01a.num_segments,
+            total_frames=sequence.total_frames,
+            segment_frames=sequence.segment_frames,
+            num_segments=sequence.num_segments,
         )
     return cfg
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Train model with configurable YAML file"
-    )
+def make_trainer(cfg: DictConfig, *, trainer_factory=None):
+    """Select a configured trainer class without experiment-name branching.
+
+    Args:
+        cfg: Composed launch config.
+        trainer_factory: Optional ordinary-trainer factory for injected tests.
+
+    Returns:
+        Recurrent capability trainer when trainer_target is configured;
+        otherwise the existing generic trainer with its original keyword
+        configuration convention.
+
+    Raises:
+        ValueError: Propagated when the selected trainer lacks required
+            episode sources or receives unsupported settings.
+    """
+    target = cfg.get("trainer_target")
+    if target:
+        return get_class(target)(cfg)
+    factory = trainer_factory or Trainer
+    return factory(**cfg)
+
+
+def main() -> None:
+    """Parse a config name, construct its selected trainer, and run it."""
+    parser = argparse.ArgumentParser(description="Train model with configurable YAML file")
     parser.add_argument(
         "--config",
         type=str,
@@ -54,10 +75,7 @@ def main():
         help="Name of the config file (without .yaml extension, default: default)",
     )
     args = parser.parse_args()
-
-    cfg = load_config(args.config)
-
-    trainer = Trainer(**cfg)
+    trainer = make_trainer(load_config(args.config))
     trainer.run()
 
 

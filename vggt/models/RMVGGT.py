@@ -22,13 +22,17 @@ class RMVGGT(nn.Module):
     memory separately.
     """
 
-    def __init__(self, aggregator: nn.Module | None = None, camera_head: nn.Module | None = None, depth_head: nn.Module | None = None, memory_writer: MemoryWriter | None = None, camera_read_adaptor: CameraReadAdaptor | None = None, depth_read_adaptor: DepthReadAdaptor | None = None, *, img_size: int = 518, patch_size: int = 14, embed_dim: int = 1024) -> None:
+    def __init__(self, aggregator: nn.Module | None = None, camera_head: nn.Module | None = None, depth_head: nn.Module | None = None, memory_writer: MemoryWriter | None = None, camera_read_adaptor: CameraReadAdaptor | None = None, depth_read_adaptor: DepthReadAdaptor | None = None, *, img_size: int = 518, patch_size: int = 14, embed_dim: int = 1024, enable_camera: bool = True, enable_depth: bool = True, enable_point: bool = False, enable_track: bool = False) -> None:
         """Initialize injected or default modules and permanently freeze encoding.
 
         Default modules preserve ``aggregator.*``, ``camera_head.*``, and
         ``depth_head.*`` state-dict prefixes. Point and tracking heads are not
         constructed. The aggregator is always evaluation-mode and frozen.
+        Configuration flags must enable both supported heads and disable point
+        and tracking; unsupported combinations fail with ValueError.
         """
+        if (enable_camera, enable_depth, enable_point, enable_track) != (True, True, False, False):
+            raise ValueError("recurrent segment model requires camera and depth heads only")
         super().__init__()
         feature_dim = embed_dim * 2
         self.aggregator = aggregator or Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
