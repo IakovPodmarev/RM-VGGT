@@ -149,4 +149,4 @@ skyseg.onnx
 *.egg-info
 
 .agents
-datasets/
+/datasets/

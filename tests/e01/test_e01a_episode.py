@@ -45,6 +45,7 @@ def _make_episode() -> dict[str, object]:
         "cam_points": cam_points,
         "world_points": world_points,
         "point_masks": torch.ones(1, frames, 2, 2, dtype=torch.bool),
+        "original_sizes": torch.tensor([2, 2]).view(1, 1, 2).expand(1, frames, 2).clone(),
     }
 
 

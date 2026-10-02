@@ -18,6 +18,7 @@ FRAME_INDEXED_FIELDS = (
     "cam_points",
     "world_points",
     "point_masks",
+    "original_sizes",
 )
 """Fields whose dimension 1 is the explicit batched frame axis."""
 
@@ -29,6 +30,7 @@ _REQUIRED_NORMALIZATION_FIELDS = (
     "point_masks",
 )
 _SEGMENT_METADATA_FIELDS = ("segment_index", "frame_start", "frame_stop")
+_OPTIONAL_FRAME_FIELDS = ("original_sizes",)
 
 
 def validate_segment_dimensions(
@@ -198,10 +200,15 @@ def normalize_segment(raw_segment_batch: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validate_episode_fields(episode: Mapping[str, Any], frame_count: int) -> None:
     """Validate the explicit temporal-field and CPU-residency contract."""
-    missing = [key for key in FRAME_INDEXED_FIELDS if key not in episode]
+    missing = [
+        key for key in FRAME_INDEXED_FIELDS
+        if key not in _OPTIONAL_FRAME_FIELDS and key not in episode
+    ]
     if missing:
         raise ValueError(f"episode is missing frame-indexed fields: {missing}")
     for key in FRAME_INDEXED_FIELDS:
+        if key not in episode:
+            continue
         value = episode[key]
         if not torch.is_tensor(value):
             raise TypeError(f"episode field {key!r} must be a tensor")

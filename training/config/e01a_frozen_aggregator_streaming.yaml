@@ -39,9 +39,25 @@ training:
 validation:
   max_episodes_per_epoch: 400
 
+vkitti_root: null
+
 episode_sources:
-  train: null
-  validation: null
+  train:
+    _target_: data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource
+    dataset_root: ${vkitti_root}
+    scenes: ${dataset_split.train}
+    training: true
+    seed: ${seed_value}
+    total_frames: ${sequence.total_frames}
+    image_size: ${img_size}
+  validation:
+    _target_: data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource
+    dataset_root: ${vkitti_root}
+    scenes: ${dataset_split.validation}
+    training: false
+    seed: ${seed_value}
+    total_frames: ${sequence.total_frames}
+    image_size: ${img_size}
 
 dataset_split:
   train: [Scene01, Scene02, Scene06, Scene18]

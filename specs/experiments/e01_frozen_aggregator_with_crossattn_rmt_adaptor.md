@@ -5,8 +5,9 @@
 Approved design specification for the first concrete experiment, `E01a`.
 
 The architecture, streaming boundary, full-BPTT training semantics, loss
-aggregation, optimizer behavior, dataset contract, controls, validation, and
-implementation sequence are fixed below. Implementation has not started.
+aggregation, optimizer behavior, and dataset contract are fixed below. Slices
+1–7 have been implemented. The real-data training smoke test, offline
+evaluation, and point-cloud visualization in slices 8–10 remain unimplemented.
 
 ## Objective
 
@@ -50,8 +51,6 @@ Out of scope for `E01a`:
 - LoRA or unfreezing aggregator layers
 - point and tracking heads
 - carrying memory between different scenes or dataloader samples
-- reconstructing one globally aligned trajectory from independently normalized
-  segment predictions
 - multi-node or multi-GPU validation; E01a is established on one training
   process before distributed support is considered
 
@@ -464,8 +463,10 @@ cross-segment statistic.
 Consequently, the three segments generally use different coordinate frames and
 scales. This is intentional: E01a models an online stream, and recurrent memory
 must tolerate the coordinate reset without receiving a future-derived
-alignment transform. Predictions from separate segments are evaluated in their
-own normalized frames and are not directly concatenated into one trajectory.
+alignment transform. Training losses use each segment's normalized frame. An
+offline evaluator may invert each segment's recorded normalization to express
+all predictions in the raw VKITTI frame, then align the complete episode as
+specified below. No such conversion or alignment enters model execution.
 
 The outer episode pipeline may receive all 24 raw frames from the current
 dataloader in one CPU batch for compatibility. It splits that CPU episode
@@ -508,6 +509,93 @@ remain enabled.
 Before the real-data run, the sequential adapter must pass a small real-sample
 inspection that verifies image/depth shapes, strictly ordered IDs, finite
 camera/depth targets, and the three independent segment normalizations.
+
+## Slice 8: real-data training smoke test
+
+Use the configured sequential VKITTI source and production model on a real
+24-frame episode. Execute the existing three-segment preparation, forward,
+loss, full-BPTT backward, gradient clipping, both AdamW parameter groups,
+scheduler, and one optimizer update. Save a checkpoint, reload it, and complete
+one further update. Keep the run small; it establishes pipeline correctness,
+not convergence or scientific quality. Use offline logging and record the
+exact data/checkpoint configuration, elapsed time, and peak GPU memory.
+
+Acceptance requires strictly consecutive frame IDs, the expected shapes and
+segment order, finite losses and gradients, nonzero reachable gradients and
+parameter updates for the writer, both read adaptors, and enabled heads, and
+unchanged frozen aggregator parameters. Verify both parameter-group memberships
+and learning rates. The resumed update must use restored trainable model,
+optimizer, scheduler, and scaler state. A missing dataset root, pretrained
+checkpoint, or suitable GPU is reported as an unmet prerequisite rather than
+as a successful smoke run. The one-sample overfit check remains a separate
+acceptance criterion for the later controlled experiment.
+
+## Slice 9: offline Sim(3)-aligned evaluation
+
+Scientific pose and point metrics are computed by a separate offline evaluator
+from a saved checkpoint and fixed VKITTI validation episodes. They are not
+computed inside training, its loss-only validation loop, or checkpoint
+selection. The evaluator runs inference without gradients and records episode
+identity, scene/variation/camera, exact frame IDs, predictions, required
+geometry metadata, per-episode results, and aggregate results. Its production
+entry point and symbols use capability-based names.
+
+Training normalizes each eight-frame segment independently. Before alignment,
+decode each predicted pose into OpenCV camera-from-world extrinsics, derive
+camera centers, and convert predicted poses and depth-derived world points from
+their segment-local coordinates to the raw VKITTI coordinate frame by inverting
+that segment's known first-camera transform and valid-point scale. Record or
+recompute those normalization values from the corresponding raw segment; do
+not estimate them from predictions. Use predicted depth, predicted camera
+geometry, and the corresponding image pixel/intrinsic convention to derive
+predicted 3D points. Check identity, shape, frame order, finite values, and
+coordinate conventions before fitting an alignment.
+
+Fit exactly one reflection-free Sim(3), with positive scale, from the 24
+predicted camera centers to their 24 ground-truth camera centers. Apply that
+same transform to every predicted camera center, orientation/pose, and
+depth-derived point in the episode. Do not fit a separate alignment per
+segment or for the point cloud. A degenerate camera trajectory or failed fit
+is an explicit evaluation failure, not a silent change of alignment policy.
+No ATE or point RMSE is computed before this episode-level alignment.
+
+Translation ATE is the root mean square Euclidean distance between aligned
+predicted and ground-truth camera centers over the 24 corresponding frames.
+Point error is the Euclidean distance between the aligned predicted and
+ground-truth 3D points at the same valid frame/pixel location. Point RMSE is
+the square root of the mean squared point error across all valid
+correspondences in the episode. Report valid-point counts; exclude invalid or
+nonfinite points consistently and fail clearly when none remain. This is a
+pixel-correspondence metric, not nearest-neighbor cloud distance. Aggregate
+episode results without silently replacing an episode-weighted mean with a
+point-weighted global RMSE; label any additional aggregate explicitly.
+
+Focused tests cover one nondegenerate perfect prediction (zero error), a
+known similarity transform, known residual errors, masks, empty valid sets,
+degenerate trajectories, frame-identity mismatches, segment reconstruction,
+and reuse of the one pose-derived alignment for points. A small real VKITTI
+checkpoint evaluation must produce finite metrics before this slice closes.
+
+## Slice 10: point-cloud visualization
+
+Build a separate visualization entry point on the existing point-cloud/GLB
+utilities. Consume the same fixed-episode inference artifacts and coordinate
+conversion as the offline evaluator. Reassemble frames in temporal order,
+derive world points from predicted depth and camera geometry, and color them
+from corresponding RGB pixels. Support valid-point and optional confidence
+filtering, predicted and ground-truth geometry, and camera trajectories.
+Preserve a documented common coordinate frame for each exported scene; if an
+evaluation-aligned overlay is requested, use the episode's single fitted
+Sim(3) for both predicted cameras and points. An unaligned prediction may be
+shown in its own frame, clearly labeled. Do not let an existing viewer's
+automatic scene realignment silently change the stated frame.
+
+Export a headless, nonempty GLB or other standard point-cloud artifact using
+existing project utilities where practical. Rendering and optional viewer
+dependencies stay outside the training path. Tests cover segment/frame order,
+point-to-color correspondence, masks and filtering, coordinate transforms,
+output counts, and headless export. Inspect one exported real VKITTI episode
+before this slice closes.
 
 ## Full-BPTT sequence training
 
@@ -667,7 +755,10 @@ Implementation proceeds in small verified slices:
 5. add the three-segment full-BPTT orchestrator and cross-segment gradient tests
 6. integrate the existing loss, optimizer groups, logging, and checkpoint path
 7. add the sequential VKITTI adapter and real-sample inspection
-8. run one-sample overfit, then the controlled multi-seed experiment
+8. run the real VKITTI end-to-end training and checkpoint-resume smoke test
+9. add and test offline episode-level Sim(3)-aligned ATE and point RMSE
+10. add and test point-cloud visualization based on existing utilities
+11. run one-sample overfit, then the controlled multi-seed experiment
 
 Each slice must report tests, observed shapes, trainable parameter counts, and
 blockers before the next slice begins.

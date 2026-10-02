@@ -10,6 +10,7 @@ import sys
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 from torch import Tensor, nn
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -274,13 +275,13 @@ def test_e01a_limits_are_exact_and_memory_resets_per_phase(tmp_path: Path) -> No
     assert all(memory.shape == (1, 1, 1) for memory in model.first_memories)
 
 
-def test_e01a_launch_dispatch_and_missing_source_are_explicit(tmp_path: Path) -> None:
-    """Generic config dispatch selects the new runner and rejects random-frame data."""
+def test_e01a_launch_dispatch_and_configured_sources_are_explicit(tmp_path: Path) -> None:
+    """Generic config dispatch names callable sequential source targets."""
     cfg = load_config("e01a_frozen_aggregator_streaming")
     assert cfg.trainer_target == "recurrent_trainer.RecurrentTrainer"
     assert cfg.model._target_ == "vggt.models.RMVGGT.RMVGGT"
-    with pytest.raises(ValueError, match="episode source|sequential"):
-        make_trainer(cfg)
+    assert RecurrentTrainer._configured_source(OmegaConf.to_container(cfg, resolve=True)["episode_sources"]["train"]) is not None
+    assert RecurrentTrainer._configured_source(OmegaConf.to_container(cfg, resolve=True)["episode_sources"]["validation"]) is not None
     class FakeTrainer:
         """Capture ordinary config dispatch without starting distributed training."""
 
@@ -294,15 +295,11 @@ def test_e01a_launch_dispatch_and_missing_source_are_explicit(tmp_path: Path) ->
     assert ordinary.kwargs["logging"].log_dir == "logs"
 
 
-def test_e01a_documented_script_dispatch_imports_the_recurrent_trainer() -> None:
-    """Script execution imports the configured top-level recurrent trainer."""
-    result = subprocess.run(
-        [sys.executable, str(TRAINING_ROOT / "launch.py"), "--config", "e01a_frozen_aggregator_streaming"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "requires sequential train and validation episode sources" in result.stderr
-    assert "No module named" not in result.stderr
+def test_e01a_documented_source_target_imports_without_launching_training() -> None:
+    """Configured source targets resolve without constructing a model or logger."""
+    cfg = load_config("e01a_frozen_aggregator_streaming")
+    train = RecurrentTrainer._configured_source(OmegaConf.to_container(cfg, resolve=True)["episode_sources"]["train"])
+    validation = RecurrentTrainer._configured_source(OmegaConf.to_container(cfg, resolve=True)["episode_sources"]["validation"])
+    assert callable(train) and callable(validation)
+    with pytest.raises(ValueError, match="dataset root"):
+        train(0)
