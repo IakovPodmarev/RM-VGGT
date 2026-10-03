@@ -35,13 +35,13 @@ class MemoryWriterBlock(nn.Module):
 class MemoryWriter(nn.Module):
     """Produce E01a recurrent memory from one segment's frozen layer-23 features.
 
-    Defaults implement eight input frames, eight slots per typed group, a
+    Configuration supplies the frame count; defaults use eight slots per typed group, a
     37-by-37 patch grid pooled to 16-by-16, width 2048 observations, width 512
     state, three blocks, and four attention heads. Type and slot embeddings
     affect attention representations only and are never accumulated into state.
     """
 
-    def __init__(self, *, feature_dim: int = 2048, memory_dim: int = 512, num_frames: int = 8, memory_slots_per_type: int = 8, patch_grid_size: int = 37, pooled_grid_size: int = 16, num_blocks: int = 3, num_heads: int = 4) -> None:
+    def __init__(self, *, feature_dim: int = 2048, memory_dim: int = 512, num_frames: int, memory_slots_per_type: int = 8, patch_grid_size: int = 37, pooled_grid_size: int = 16, num_blocks: int = 3, num_heads: int = 4) -> None:
         """Initialize writer parameters and reject incompatible E01a geometry.
 
         Raises:

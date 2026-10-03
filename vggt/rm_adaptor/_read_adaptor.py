@@ -39,7 +39,7 @@ class _ReadAdaptorBase(nn.Module):
         *,
         feature_dim: int = 2048,
         memory_dim: int = 512,
-        num_frames: int = 8,
+        num_frames: int,
         memory_tokens: int = 16,
         num_blocks: int = 3,
         num_heads: int = 8,

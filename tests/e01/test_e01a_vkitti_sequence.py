@@ -72,7 +72,7 @@ def write_stream(
 
 def source(root: Path | None, scenes: list[str], training: bool) -> SequentialVKittiEpisodeSource:
     """Construct the small deterministic source shared by source-boundary tests."""
-    return SequentialVKittiEpisodeSource(root, scenes, training=training, seed=17, image_size=14)
+    return SequentialVKittiEpisodeSource(root, scenes, training=training, seed=17, total_frames=24, image_size=14)
 
 
 @pytest.fixture
@@ -96,7 +96,7 @@ def test_config_composes_source_targets() -> None:
 
     assert cfg.episode_sources.train._target_ == "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource"
     assert cfg.episode_sources.validation._target_ == "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource"
-    assert (cfg.sequence.total_frames, cfg.sequence.segment_frames, cfg.sequence.num_segments) == (24, 8, 3)
+    assert (cfg.sequence.total_frames, cfg.sequence.segment_frames, cfg.sequence.num_segments) == (9, 3, 3)
 
 
 def test_scene_filtering_ordering_and_cpu_raw_contract(root: Path) -> None:
@@ -146,8 +146,8 @@ def test_camera_identity_read_only_processing_and_split_boundary(root: Path) -> 
     raw = next(iter(source(root, ["Scene20"], False)(0)))
     after = sorted(path.relative_to(root) for path in root.rglob("*"))
     same = next(iter(source(root, ["Scene20"], False)(9)))
-    segments = split_episode(raw)
-    prepared = list(iter_prepared_segments(raw, device=torch.device("cpu")))
+    segments = split_episode(raw, total_frames=24, segment_frames=8)
+    prepared = list(iter_prepared_segments(raw, device=torch.device("cpu"), total_frames=24, segment_frames=8))
 
     assert after == before
     assert torch.allclose(raw["extrinsics"][0, :, 0, 3], torch.arange(24, dtype=torch.float32))
@@ -170,11 +170,11 @@ def test_errors_inspection_and_configured_source(root: Path, tmp_path: Path) -> 
     with pytest.raises(ValueError, match="Scene01.*clone.*Camera_0.*9"):
         list(source(invalid_root, ["Scene01"], False)(0))
 
-    report = inspect_sequential_episodes(source(root, ["Scene01"], True), source(root, ["Scene20"], False))
+    report = inspect_sequential_episodes(source(root, ["Scene01"], True), source(root, ["Scene20"], False), total_frames=24, segment_frames=8, num_segments=3)
     assert report["train"]["segment_indices"] == [0, 1, 2]
     assert report["train"]["deterministic_processing"] is True
     configured = RecurrentTrainer._configured_source(
-        {"_target_": "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource", "dataset_root": str(root), "scenes": ["Scene20"], "training": False, "seed": 17, "image_size": 14}
+        {"_target_": "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource", "dataset_root": str(root), "scenes": ["Scene20"], "training": False, "seed": 17, "total_frames": 24, "image_size": 14}
     )
     assert next(iter(configured(0)))["images"].shape[1] == 24
 
@@ -198,7 +198,7 @@ def test_hydra_root_override_instantiates_both_sources(root: Path) -> None:
     train = RecurrentTrainer._configured_source(specs["train"])
     validation = RecurrentTrainer._configured_source(specs["validation"])
     assert train is not None and validation is not None
-    assert next(iter(train(0)))["images"].shape == (1, 24, 3, 14, 14)
+    assert next(iter(train(0)))["images"].shape == (1, cfg.sequence.total_frames, 3, 14, 14)
     assert next(iter(validation(0)))["episode_metadata"]["scene"] == "Scene20"
 
 
@@ -221,3 +221,28 @@ def test_finite_camera_value_overflowing_float32_has_frame_context(tmp_path: Pat
 
     with pytest.raises(ValueError, match=r"float32 conversion Scene01/clone/Camera_0/9"):
         next(iter(source(tmp_path, ["Scene01"], False)(0)))
+
+
+
+def test_active_config_selects_nine_frame_windows_and_three_prepared_segments(
+    root: Path,
+) -> None:
+    """The configured proof-of-concept schedule reaches source and inspector."""
+    cfg = load_config("e01a_frozen_aggregator_streaming")
+    train = SequentialVKittiEpisodeSource(
+        root, ["Scene01"], training=True, seed=17,
+        total_frames=cfg.sequence.total_frames, image_size=14,
+    )
+    validation = SequentialVKittiEpisodeSource(
+        root, ["Scene20"], training=False, seed=17,
+        total_frames=cfg.sequence.total_frames, image_size=14,
+    )
+    report = inspect_sequential_episodes(
+        train, validation, total_frames=cfg.sequence.total_frames,
+        segment_frames=cfg.sequence.segment_frames,
+        num_segments=cfg.sequence.num_segments,
+    )
+    for phase in ("train", "validation"):
+        assert len(report[phase]["frame_ids"]) == 9
+        assert report[phase]["segment_indices"] == [0, 1, 2]
+        assert report[phase]["segment_frame_counts"] == [3, 3, 3]

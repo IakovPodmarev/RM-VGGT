@@ -57,8 +57,8 @@ def test_streaming_config_composes_with_fixed_values():
     assert cfg.img_size == 518
     assert dict(cfg.e01a) == {
         "experiment_id": "E01a",
-        "total_frames": 24,
-        "segment_frames": 8,
+        "total_frames": 9,
+        "segment_frames": 3,
         "num_segments": 3,
         "backprop_mode": "full",
         "memory_enabled": True,
@@ -79,8 +79,8 @@ def test_load_config_rejects_inconsistent_e01a_dimensions():
         load_config(
             "e01a_frozen_aggregator_streaming",
             overrides=[
-                "e01a.total_frames=24",
-                "e01a.segment_frames=6",
+                "sequence.total_frames=10",
+                "e01a.segment_frames=3",
                 "e01a.num_segments=3",
             ],
         )
@@ -107,7 +107,7 @@ def test_dimension_validator_accepts_exact_partitions_and_rejects_others():
 
 def test_split_episode_slices_every_contracted_field_in_strict_order():
     """All contracted fields preserve the three ordered, non-overlapping ranges."""
-    segments = split_episode(_make_episode())
+    segments = split_episode(_make_episode(), total_frames=24, segment_frames=8)
 
     assert len(segments) == 3
     for index, segment in enumerate(segments):
@@ -139,7 +139,7 @@ def test_split_episode_accepts_other_exact_partitions():
 def test_normalization_is_segment_local_and_keeps_first_camera_identity():
     """Each segment's valid points alone establish unit scale and its camera origin."""
     normalized = [
-        normalize_segment(segment) for segment in split_episode(_make_episode())
+        normalize_segment(segment) for segment in split_episode(_make_episode(), total_frames=24, segment_frames=8)
     ]
 
     for segment in normalized:
@@ -167,17 +167,33 @@ def test_future_and_mutation_isolation():
     future_changed["images"][:, 8:] += 99
     future_changed["world_points"][:, 8:] *= 100
 
-    baseline_zero = normalize_segment(split_episode(baseline)[0])
-    changed_segments = split_episode(future_changed)
+    baseline_zero = normalize_segment(split_episode(baseline, total_frames=24, segment_frames=8)[0])
+    changed_segments = split_episode(future_changed, total_frames=24, segment_frames=8)
     changed_zero = normalize_segment(changed_segments[0])
     for field in FRAME_INDEXED_FIELDS:
         torch.testing.assert_close(baseline_zero[field], changed_zero[field])
 
     raw_images = baseline["images"].clone()
-    split = split_episode(baseline)
+    split = split_episode(baseline, total_frames=24, segment_frames=8)
     split[0]["images"].zero_()
     split[0]["episode_metadata"]["camera"] = "changed"
     assert torch.equal(baseline["images"], raw_images)
     assert split[1]["images"].any()
     assert baseline["episode_metadata"]["camera"] == "left"
     assert split[1]["episode_metadata"]["camera"] == "left"
+
+
+
+def test_active_config_splits_nine_frames_into_three_segments() -> None:
+    """The same splitter accepts the configured shorter episode geometry."""
+    cfg = load_config("e01a_frozen_aggregator_streaming")
+    raw = _make_episode()
+    for field in FRAME_INDEXED_FIELDS:
+        raw[field] = raw[field][:, : cfg.sequence.total_frames].clone()
+    segments = split_episode(
+        raw, total_frames=cfg.sequence.total_frames,
+        segment_frames=cfg.sequence.segment_frames,
+    )
+    assert [segment["ids"][0].tolist() for segment in segments] == [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8]
+    ]

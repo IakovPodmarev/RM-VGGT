@@ -15,8 +15,8 @@ episode_batch_size: 1
 
 e01a:
   experiment_id: E01a
-  total_frames: 24
-  segment_frames: 8
+  total_frames: ${frame_product:${e01a.segment_frames},${e01a.num_segments}}
+  segment_frames: 3
   num_segments: 3
   backprop_mode: full
   memory_enabled: true
@@ -73,6 +73,7 @@ memory:
 model:
   _target_: vggt.models.RMVGGT.RMVGGT
   img_size: ${img_size}
+  segment_frames: ${sequence.segment_frames}
   enable_camera: true
   enable_depth: true
   enable_point: false
@@ -97,6 +98,7 @@ optim:
   amp:
     enabled: true
     amp_dtype: bfloat16
+    init_scale: 65536.0
   gradient_clip:
     _target_: train_utils.gradient_clip.GradientClipper
     configs:

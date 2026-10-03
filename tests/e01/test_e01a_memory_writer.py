@@ -41,13 +41,14 @@ def _inputs(
 
 def test_e01a_default_contract_exposes_typed_parameters_and_initial_memory():
     """Default E01a dimensions and learned typed state follow the approved contract."""
-    writer = MemoryWriter()
+    writer = MemoryWriter(num_frames=3)
 
     assert writer.memory_type_embedding.shape == (2, 512)
     assert writer.query_type_embedding.shape == (2, 512)
     assert writer.slot_embedding.shape == (16, 512)
     assert writer.initial_memory_bank.shape == (1, 16, 512)
     assert writer.write_queries.shape == (1, 16, 512)
+    assert writer.temporal_embedding.shape == (3, 512)
     assert writer.patch_position_embedding.shape == (256, 512)
     assert "patch_position_embedding" not in writer.state_dict()
 
@@ -60,7 +61,7 @@ def test_e01a_default_contract_exposes_typed_parameters_and_initial_memory():
 
 def test_e01a_patch_position_embedding_uses_approved_row_major_sinusoid():
     """The fixed 16-by-16 float32 buffer uses the specified row/column order."""
-    writer = MemoryWriter()
+    writer = MemoryWriter(num_frames=3)
     position = writer.patch_position_embedding
 
     assert position.dtype == torch.float32

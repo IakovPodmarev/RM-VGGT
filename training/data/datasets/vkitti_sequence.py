@@ -61,16 +61,19 @@ class SequentialVKittiEpisodeSource:
         *,
         training: bool,
         seed: int,
-        total_frames: int = 24,
+        total_frames: int,
         image_size: int = 518,
     ) -> None:
         """Store source settings; reject invalid dimensions and empty scene sets.
 
+        The configured positive total frame count defines complete windows.
         A null root is accepted here for Hydra composition. The first call
         raises an actionable error if the root is null or absent.
         """
-        if total_frames != 24 or image_size <= 0:
-            raise ValueError("total_frames must be 24 and image_size must be positive")
+        if not isinstance(total_frames, int) or isinstance(total_frames, bool) or total_frames <= 0:
+            raise ValueError("total_frames must be a positive integer")
+        if image_size <= 0:
+            raise ValueError("image_size must be positive")
         self.dataset_root = Path(dataset_root) if dataset_root is not None else None
         self.scenes = tuple(scenes)
         if not self.scenes or any(not isinstance(scene, str) for scene in self.scenes):

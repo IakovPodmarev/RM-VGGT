@@ -181,8 +181,8 @@ def test_e01a_preparation_splits_then_interleaves_normalize_transfer_and_model(m
     monkeypatch.setattr(module, "transfer_segment_to_device", transfer)
     model.forward = forward
     from training.recurrent_sequence import run_recurrent_sequence
-    prepared = iter_prepared_segments(raw, device=torch.device("cpu"))
-    run_recurrent_sequence(model, prepared)
+    prepared = iter_prepared_segments(raw, device=torch.device("cpu"), total_frames=24, segment_frames=8)
+    run_recurrent_sequence(model, prepared, num_segments=3, segment_frames=8)
     assert events == ["split", "normalize0", "transfer0", "model0", "normalize1", "transfer1", "model1", "normalize2", "transfer2", "model2"]
     for name in raw:
         if torch.is_tensor(raw[name]):
@@ -192,7 +192,7 @@ def test_e01a_preparation_splits_then_interleaves_normalize_transfer_and_model(m
 
 def test_e01a_preparation_preserves_local_geometry_and_metadata() -> None:
     """Each segment has its own unit scale, first camera, IDs, and ordered identity."""
-    segments = list(iter_prepared_segments(episode(), device=torch.device("cpu")))
+    segments = list(iter_prepared_segments(episode(), device=torch.device("cpu"), total_frames=24, segment_frames=8))
     assert [item["ids"].tolist() for item in segments] == [[list(range(i, i + 8))] for i in (0, 8, 16)]
     assert [item["segment_index"] for item in segments] == [0, 1, 2]
     assert [item["seq_name"] for item in segments] == [["scene-left"]] * 3

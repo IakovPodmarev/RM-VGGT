@@ -30,7 +30,7 @@ def compute_recurrent_losses(
     segments: Sequence[Mapping[str, Any]],
     loss_fn: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Tensor]],
     *,
-    num_segments: int = 3,
+    num_segments: int,
 ) -> RecurrentLossResult:
     """Evaluate ordered segment losses and form one equal-weight objective.
 

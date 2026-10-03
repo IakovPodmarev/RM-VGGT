@@ -22,12 +22,13 @@ class RMVGGT(nn.Module):
     memory separately.
     """
 
-    def __init__(self, aggregator: nn.Module | None = None, camera_head: nn.Module | None = None, depth_head: nn.Module | None = None, memory_writer: MemoryWriter | None = None, camera_read_adaptor: CameraReadAdaptor | None = None, depth_read_adaptor: DepthReadAdaptor | None = None, *, img_size: int = 518, patch_size: int = 14, embed_dim: int = 1024, enable_camera: bool = True, enable_depth: bool = True, enable_point: bool = False, enable_track: bool = False) -> None:
+    def __init__(self, aggregator: nn.Module | None = None, camera_head: nn.Module | None = None, depth_head: nn.Module | None = None, memory_writer: MemoryWriter | None = None, camera_read_adaptor: CameraReadAdaptor | None = None, depth_read_adaptor: DepthReadAdaptor | None = None, *, img_size: int = 518, patch_size: int = 14, embed_dim: int = 1024, segment_frames: int, enable_camera: bool = True, enable_depth: bool = True, enable_point: bool = False, enable_track: bool = False) -> None:
         """Initialize injected or default modules and permanently freeze encoding.
 
         Default modules preserve ``aggregator.*``, ``camera_head.*``, and
         ``depth_head.*`` state-dict prefixes. Point and tracking heads are not
-        constructed. The aggregator is always evaluation-mode and frozen.
+        constructed. Configured segment frames set the writer and both readers'
+        temporal geometry. The aggregator is always evaluation-mode and frozen.
         Configuration flags must enable both supported heads and disable point
         and tracking; unsupported combinations fail with ValueError.
         """
@@ -38,9 +39,9 @@ class RMVGGT(nn.Module):
         self.aggregator = aggregator or Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
         self.camera_head = camera_head or CameraHead(dim_in=feature_dim)
         self.depth_head = depth_head or DPTHead(dim_in=feature_dim, output_dim=2, activation="exp", conf_activation="expp1", patch_size=patch_size)
-        self.memory_writer = memory_writer or MemoryWriter(feature_dim=feature_dim)
-        self.camera_read_adaptor = camera_read_adaptor or CameraReadAdaptor(feature_dim=feature_dim)
-        self.depth_read_adaptor = depth_read_adaptor or DepthReadAdaptor(feature_dim=feature_dim)
+        self.memory_writer = memory_writer or MemoryWriter(feature_dim=feature_dim, num_frames=segment_frames)
+        self.camera_read_adaptor = camera_read_adaptor or CameraReadAdaptor(feature_dim=feature_dim, num_frames=segment_frames)
+        self.depth_read_adaptor = depth_read_adaptor or DepthReadAdaptor(feature_dim=feature_dim, num_frames=segment_frames)
         for parameter in self.aggregator.parameters():
             parameter.requires_grad_(False)
         self.aggregator.eval()

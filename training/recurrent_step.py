@@ -45,8 +45,9 @@ def run_recurrent_train_step(
     autocast_dtype: torch.dtype,
     scheduler_progress: float,
     autocast_device_type: str = "cuda",
-    num_segments: int = 3,
-    segment_frames: int = 8,
+    num_segments: int,
+    segment_frames: int,
+    diagnostic: Any | None = None,
 ) -> RecurrentTrainStepResult:
     """Run one full-BPTT recurrent sequence and exactly one optimizer update.
 
@@ -65,6 +66,9 @@ def run_recurrent_train_step(
         autocast_device_type: Device type passed to the autocast context.
         num_segments: Exact number of ordered prepared mappings to consume.
         segment_frames: Required image-frame count in every consumed mapping.
+        diagnostic: Optional observer for geometry, unscaled gradients, clipping,
+            scheduled rates, and the actual underlying optimizer step. It must
+            retain detached evidence only and release temporary hooks on error.
 
     Returns:
         The sequence result, segment-local loss result, and pre-clipping global
@@ -102,16 +106,33 @@ def run_recurrent_train_step(
         losses = compute_recurrent_losses(sequence, recorded, loss_fn, num_segments=num_segments)
     if not torch.isfinite(losses.objective).all():
         raise ValueError("sequence objective must be finite")
+    if diagnostic is not None:
+        diagnostic.before_update(model, sequence, losses, recorded, optimizer)
     scaler.scale(losses.objective).backward()
+    if diagnostic is not None:
+        diagnostic.after_backward()
     underlying = optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer
     scaler.unscale_(underlying)
+    if diagnostic is not None:
+        diagnostic.after_unscale(model)
     norm = gradient_clipper(model)
     if isinstance(norm, Mapping):
         if len(norm) != 1:
             raise ValueError("gradient clipper must report one combined norm")
         norm = next(iter(norm.values()))
+    if diagnostic is not None:
+        diagnostic.after_clip(norm)
     if hasattr(optimizer, "step_schedulers"):
         optimizer.step_schedulers(scheduler_progress)
-    scaler.step(underlying)
+    if diagnostic is not None:
+        diagnostic.after_schedule(optimizer, scheduler_progress)
+        # A GradScaler may silently skip its underlying step on overflow.
+        # The observer counts actual optimizer calls and checks value changes.
+        with diagnostic.observe_step(underlying):
+            scaler.step(underlying)
+    else:
+        scaler.step(underlying)
     scaler.update()
+    if diagnostic is not None:
+        diagnostic.after_update(model, optimizer, scaler)
     return RecurrentTrainStepResult(sequence, losses, norm)

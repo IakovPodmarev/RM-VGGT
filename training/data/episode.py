@@ -80,7 +80,7 @@ def validate_segment_dimensions(
 
 
 def split_episode(
-    raw_episode: Mapping[str, Any], total_frames: int = 24, segment_frames: int = 8
+    raw_episode: Mapping[str, Any], total_frames: int, segment_frames: int
 ) -> list[dict[str, Any]]:
     """Split one raw CPU episode into ordered, isolated segment batches.
 

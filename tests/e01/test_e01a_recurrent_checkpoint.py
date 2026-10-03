@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -91,6 +90,22 @@ def test_e01a_resume_restores_complete_state_and_progress(tmp_path: Path) -> Non
     assert [group["lr"] for group in runner.optimizer.optimizer.param_groups] == [group["lr"] for group in partial.optimizer.optimizer.param_groups]
     runner.run()
     assert runner.completed_updates == 2 and runner.next_epoch == 2
+
+
+def test_e01a_resume_rejects_changed_schedule_before_loading_weights(tmp_path: Path) -> None:
+    """A changed warmup definition cannot reinterpret saved progress on resume."""
+    _run(tmp_path / "first", epochs=1)
+    checkpoint = tmp_path / "first" / "epoch_0000.pt"
+    cfg = config(tmp_path / "changed", epochs=2)
+    cfg["training"]["scheduled_updates"] = 2
+    cfg["optim"]["scheduler"]["warmup_fraction"] = 0.2
+    runner = RecurrentTrainer(cfg, train_episodes=source(1), validation_episodes=source(1),
+                              model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger())
+    before = {name: value.clone() for name, value in runner.model.state_dict().items()}
+    with pytest.raises(ValueError, match="scheduler"):
+        runner.resume_from_checkpoint(checkpoint)
+    assert all(torch.equal(before[name], value) for name, value in runner.model.state_dict().items())
+    assert runner.completed_updates == 0 and runner.next_epoch == 0
 
 
 def test_e01a_cpu_continuation_matches_uninterrupted_epoch_boundary(tmp_path: Path) -> None:

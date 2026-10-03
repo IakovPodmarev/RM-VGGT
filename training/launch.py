@@ -11,7 +11,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from data.episode import validate_segment_dimensions
 from hydra import compose, initialize
 from hydra.utils import get_class
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from trainer import Trainer
 
 
@@ -30,6 +30,11 @@ def load_config(config_name: str, overrides: list[str] | None = None) -> DictCon
         ValueError: If configured sequence dimensions do not partition.
         hydra.errors.HydraException: If composition fails.
     """
+    if not OmegaConf.has_resolver("frame_product"):
+        OmegaConf.register_new_resolver(
+            "frame_product",
+            lambda segment_frames, num_segments: segment_frames * num_segments,
+        )
     with initialize(version_base=None, config_path="config"):
         cfg = compose(config_name=config_name, overrides=overrides or [])
     if "sequence" in cfg:
@@ -67,7 +72,9 @@ def make_trainer(cfg: DictConfig, *, trainer_factory=None):
 
 def main() -> None:
     """Parse a config name, construct its selected trainer, and run it."""
-    parser = argparse.ArgumentParser(description="Train model with configurable YAML file")
+    parser = argparse.ArgumentParser(
+        description="Train model with configurable YAML file"
+    )
     parser.add_argument(
         "--config",
         type=str,

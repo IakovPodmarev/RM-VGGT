@@ -34,9 +34,10 @@ def _inputs(
 
 def test_e01a_default_read_adaptor_constructors_expose_fixed_geometry():
     """Both defaults match the approved E01a feature, memory, block, and head counts."""
-    camera, depth = CameraReadAdaptor(), DepthReadAdaptor()
+    camera, depth = CameraReadAdaptor(num_frames=3), DepthReadAdaptor(num_frames=3)
 
     for adaptor in (camera, depth):
+        assert adaptor.num_frames == 3
         assert adaptor.feature_dim == 2048
         assert adaptor.memory_dim == 512
         assert adaptor.memory_tokens == 16

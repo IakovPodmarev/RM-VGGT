@@ -17,8 +17,16 @@ if str(TRAINING_ROOT) not in sys.path:
 
 from launch import load_config
 from loss import MultitaskLoss
-from training.recurrent_loss import compute_recurrent_losses
+from training.recurrent_loss import compute_recurrent_losses as _compute_recurrent_losses
 from training.recurrent_sequence import RecurrentSequenceResult
+
+
+
+def compute_recurrent_losses(sequence, targets, loss_fn, *, num_segments=3):
+    """Pass the legacy three-segment fixture count into the production loss."""
+    return _compute_recurrent_losses(
+        sequence, targets, loss_fn, num_segments=num_segments
+    )
 
 
 class _RecordingLoss:

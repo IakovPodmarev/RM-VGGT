@@ -70,8 +70,8 @@ def iter_prepared_segments(
     raw_episode: Episode,
     *,
     device: torch.device,
-    total_frames: int = 24,
-    segment_frames: int = 8,
+    total_frames: int,
+    segment_frames: int,
 ) -> Iterable[dict[str, Any]]:
     """Split CPU frames first, then normalize and transfer each requested segment.
 
@@ -243,15 +243,21 @@ class RecurrentTrainer:
         model: nn.Module | None = None,
         loss_fn: LossFunction | None = None,
         logger: Any | None = None,
+        diagnostic: Any | None = None,
     ) -> None:
         """Construct from resolved config and optional test collaborators.
 
         Reject missing episode sources, unsupported sequence or accumulation
         settings, and invalid one-device limits. Initialize model, loss,
         optimizer, scaler, clipper, logger, and optional preload or full resume.
-        Construction performs no sequence update or distributed setup.
+        Construction performs no sequence update or distributed setup. The
+        optional AMP initial scale configures fresh float16 training; full
+        resume replaces scaler state from the epoch checkpoint.
+        The optional diagnostic observes detached evidence around each update;
+        the trainer does not retain episode graphs after logging.
         """
         self.config = OmegaConf.to_container(OmegaConf.create(config), resolve=True)
+        self.diagnostic = diagnostic
         cfg = self.config
         self.device = torch.device(cfg.get("device", "cuda"))
         if self.device.type not in {"cpu", "cuda"} or (self.device.type == "cuda" and not torch.cuda.is_available()):
@@ -295,7 +301,11 @@ class RecurrentTrainer:
         amp = cfg["optim"]["amp"]
         self.autocast_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[amp["amp_dtype"]]
         self.autocast_enabled = bool(amp["enabled"]) and torch.amp.autocast_mode.is_autocast_available(self.device.type)
-        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.autocast_enabled and self.autocast_dtype == torch.float16)
+        self.scaler = torch.amp.GradScaler(
+            self.device.type,
+            init_scale=float(amp.get("init_scale", 65536.0)),
+            enabled=self.autocast_enabled and self.autocast_dtype == torch.float16,
+        )
         self.loss_weights = {
             "camera": float((cfg.get("loss", {}).get("camera") or {}).get("weight", 1.0)),
             "depth": float((cfg.get("loss", {}).get("depth") or {}).get("weight", 1.0)),
@@ -308,7 +318,7 @@ class RecurrentTrainer:
             "experiment_id": cfg.get("experiment_id", cfg.get("exp_name")),
             "seed": self.seed,
             "dataset_split": cfg.get("dataset_split"),
-            "memory_settings": cfg.get("memory", cfg.get("e01a")),
+            "memory_settings": cfg.get("memory"),
             "trainable_parameters": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
             "frozen_parameters": sum(p.numel() for p in self.model.parameters() if not p.requires_grad),
             "optimizer_group_counts": {group["name"]: sum(p.numel() for p in group["params"]) for group in self.optimizer.optimizer.param_groups},
@@ -366,11 +376,23 @@ class RecurrentTrainer:
         self.logger.log(payload, step=self.completed_updates)
 
     def run(self) -> None:
-        """Run training and validation every epoch, then save complete state."""
+        """Run training and loss-only validation, then save epoch state.
+
+        With an update diagnostic, synchronize around checkpoint saving and log
+        its separate wall time. Episode timing already includes diagnostic
+        hashing, so neither number is a throughput benchmark.
+        """
         for epoch in range(self.next_epoch, self.max_epochs):
             self.train_epoch(epoch)
             validation = self.validate_epoch(epoch)
+            if self.diagnostic is not None and self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            checkpoint_started = time.perf_counter()
             self.save_checkpoint(epoch, validation["objective"])
+            if self.diagnostic is not None:
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                self._log_episode("checkpoint", {"elapsed_seconds": time.perf_counter() - checkpoint_started}, epoch)
             self.next_epoch = epoch + 1
         if hasattr(self.logger, "finish"):
             self.logger.finish()
@@ -397,6 +419,7 @@ class RecurrentTrainer:
                 scheduler_progress=(self.completed_updates + 1) / self.scheduled_updates,
                 num_segments=self.num_segments,
                 segment_frames=self.segment_frames,
+                diagnostic=self.diagnostic,
             )
             self.completed_updates += 1
             elapsed, peak = self._measure_end(start)
@@ -465,7 +488,13 @@ class RecurrentTrainer:
             robust_torch_save(checkpoint, str(self.checkpoint_dir / "best.pt"))
 
     def resume_from_checkpoint(self, checkpoint_path: str | Path) -> None:
-        """Strictly restore full epoch-boundary state to the intended device."""
+        """Strictly restore an epoch boundary without retaining recurrent state.
+
+        The saved optimizer group values, moments and steps, scaler state
+        (including an empty disabled state), counters, and RNG are restored.
+        Progress-based schedulers have no separate state object: their config,
+        budget and saved progress must agree before model state is changed.
+        """
         state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         required = {
             "model", "optimizer", "scaler", "scheduler_progress", "scheduled_updates",
@@ -476,6 +505,11 @@ class RecurrentTrainer:
             raise ValueError("full resume checkpoint is missing optimizer or training state")
         if state["scheduled_updates"] != self.scheduled_updates:
             raise ValueError("scheduled update budget differs from resume checkpoint")
+        for key in ("scheduler", "learning_rates", "amp"):
+            if state["config"]["optim"][key] != self.config["optim"][key]:
+                raise ValueError(f"optimizer {key} differs from resume checkpoint")
+        if state["config"]["optim"]["optimizer"] != self.config["optim"]["optimizer"]:
+            raise ValueError("optimizer definition differs from resume checkpoint")
         if state["next_epoch"] != state["completed_epoch"] + 1:
             raise ValueError("resume checkpoint epoch counters are inconsistent")
         if not math.isclose(state["scheduler_progress"], state["completed_updates"] / self.scheduled_updates):

@@ -34,8 +34,8 @@ def run_recurrent_sequence(
     model: Any,
     segments: Iterable[Mapping[str, Any]],
     *,
-    num_segments: int = 3,
-    segment_frames: int = 8,
+    num_segments: int,
+    segment_frames: int,
 ) -> RecurrentSequenceResult:
     """Process prepared segments in strict order with an external memory state.
 

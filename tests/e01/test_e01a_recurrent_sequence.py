@@ -9,8 +9,15 @@ import pytest
 import torch
 from torch import Tensor, nn
 
-from training.recurrent_sequence import run_recurrent_sequence
+from training.recurrent_sequence import run_recurrent_sequence as _run_recurrent_sequence
 from vggt.models.RMVGGT import RMVGGT
+
+
+def run_recurrent_sequence(model, segments, *, num_segments=3, segment_frames=8):
+    """Exercise the production orchestrator with the legacy 3-by-8 fixture."""
+    return _run_recurrent_sequence(
+        model, segments, num_segments=num_segments, segment_frames=segment_frames
+    )
 
 
 class _SequenceModel(nn.Module):
@@ -302,3 +309,16 @@ def test_e01a_sequence_rejects_later_invalid_metadata_after_prior_calls(metadata
 
     assert model.initial_calls == 1
     assert model.module_calls == 1
+
+
+
+def test_configured_segment_count_changes_state_and_prediction_lengths() -> None:
+    """A shorter schedule retains one memory state beyond its predictions."""
+    model = _SequenceModel()
+    result = _run_recurrent_sequence(
+        model, _segments()[:2], num_segments=2, segment_frames=8
+    )
+    assert len(result.predictions) == 2
+    assert len(result.memory_states) == 3
+    assert result.final_memory is result.memory_states[-1]
+    assert result.memory_states[1].grad_fn is not None

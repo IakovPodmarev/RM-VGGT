@@ -75,7 +75,7 @@ def _model() -> tuple[RMVGGT, _FakeAggregator, _FakeCameraHead, _FakeDepthHead]:
     writer = MemoryWriter(feature_dim=8, memory_dim=8, num_frames=2, memory_slots_per_type=2, patch_grid_size=2, pooled_grid_size=2, num_blocks=1, num_heads=2)
     camera_adaptor = CameraReadAdaptor(feature_dim=8, memory_dim=8, num_frames=2, memory_tokens=4, num_blocks=3, num_heads=2)
     depth_adaptor = DepthReadAdaptor(feature_dim=8, memory_dim=8, num_frames=2, memory_tokens=4, num_blocks=3, num_heads=2)
-    return RMVGGT(aggregator, camera_head, depth_head, writer, camera_adaptor, depth_adaptor), aggregator, camera_head, depth_head
+    return RMVGGT(aggregator, camera_head, depth_head, writer, camera_adaptor, depth_adaptor, segment_frames=2), aggregator, camera_head, depth_head
 
 
 def _inputs(model: RMVGGT) -> tuple[Tensor, Tensor]:
@@ -256,7 +256,7 @@ def test_e01a_rmvggt_passes_configured_patch_size_to_default_depth_head(monkeypa
     camera_adaptor = CameraReadAdaptor(feature_dim=8, memory_dim=8, num_frames=2, memory_tokens=4, num_blocks=3, num_heads=2)
     depth_adaptor = DepthReadAdaptor(feature_dim=8, memory_dim=8, num_frames=2, memory_tokens=4, num_blocks=3, num_heads=2)
 
-    RMVGGT(aggregator, _FakeCameraHead(), None, writer, camera_adaptor, depth_adaptor, patch_size=2, embed_dim=4)
+    RMVGGT(aggregator, _FakeCameraHead(), None, writer, camera_adaptor, depth_adaptor, patch_size=2, embed_dim=4, segment_frames=2)
 
     assert seen["patch_size"] == 2
 

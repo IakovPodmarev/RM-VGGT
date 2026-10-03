@@ -6,8 +6,14 @@ Approved design specification for the first concrete experiment, `E01a`.
 
 The architecture, streaming boundary, full-BPTT training semantics, loss
 aggregation, optimizer behavior, and dataset contract are fixed below. Slices
-1–7 have been implemented. The real-data training smoke test, offline
-evaluation, and point-cloud visualization in slices 8–10 remain unimplemented.
+1–7 were implemented against the original three-segment, eight-frame schedule.
+Slice 8 added configurable frame counts. A two-phase real-data smoke at five
+frames per segment and three segments completed both updates, validation, and
+checkpoint resume on one Tesla T4; independent code and evidence review is
+pending. The E01 test suite reported 159 passes. The review follow-ups on
+camera masking, AMP update accounting, and depth-adaptor gradients are not
+implemented and do not block an exploratory E01a training run. Offline evaluation and
+point-cloud visualization in slices 9–10 remain unimplemented.
 
 ## Objective
 
@@ -16,11 +22,29 @@ aggregator. A trainable memory writer compresses information from each segment
 into recurrent read/write memory, while separate trainable cross-attention
 adaptors expose incoming memory to the existing camera and depth heads.
 
-The initial proof of concept targets:
+The active proof-of-concept profile targets:
 
 - image resolution `518 x 518`
-- segment length of 8 frames
-- total sequence length of 24 frames (three segments)
+- `segment_frames = 5`
+- `num_segments = 3`
+- `episode_frames = 15`
+
+Frame counts are configuration values, not model constants. For every profile,
+`episode_frames = segment_frames * num_segments`. The existing pipeline schedule
+validation is the authority for this relationship; implementation must reuse
+it rather than introduce a parallel validation. The former three-segment,
+eight-frame schedule (`episode_frames = 24`) remains a scale-up target, not a
+passing criterion for the current five-frame, three-segment smoke. Comparisons
+must record their exact schedule.
+Existing interfaces that call the episode length `total_frames` may retain
+that name, but its value is the derived `episode_frames`, not an independent
+setting.
+
+The checked-in E01a YAML currently defaults to three frames per segment. The
+successful 15-frame smoke selected five frames explicitly. An immediate run
+at the active five-frame profile must likewise record the exact invocation
+and fully resolved configuration; a default YAML launch is a different
+nine-frame profile. Do not pool results from those profiles.
 
 ## Architectural scope
 
@@ -33,9 +57,9 @@ In scope:
 - a camera read adaptor
 - a depth read adaptor on the latest aggregator feature level
 - the existing camera and DPT heads as trainable prediction heads
-- ordered three-segment sequence orchestration
+- ordered configurable-segment sequence orchestration
 - independent preprocessing and normalization of each arriving segment
-- full backpropagation through both inter-segment recurrent boundaries
+- full backpropagation through every inter-segment recurrent boundary
 - camera and depth supervision on every segment
 - a sequential VKITTI adapter and memory-disabled control
 
@@ -179,9 +203,9 @@ The first segment uses a learned initial read-memory bank with the same typed
 partition and shape.
 
 Memory is reset to that learned initial bank at the start of every independent
-24-frame sequence. It is never carried across scenes, samples, batch chunks,
-validation examples, or optimizer steps. Batch elements must preserve their
-identity and order across all three segments.
+episode. It is never carried across scenes, samples, batch chunks, validation
+examples, or optimizer steps. Batch elements must preserve their identity and
+order across all configured segments.
 
 ## Writer inputs
 
@@ -200,13 +224,13 @@ Layer-23 patch tokens are restored to their per-frame `37 x 37` spatial grid.
 Adaptive average pooling reduces this grid to `16 x 16` for the writer only:
 
 ```text
-[B, 8, 37, 37, 2048]
+[B, segment_frames, 37, 37, 2048]
     -> adaptive average pooling
-[B, 8, 16, 16, 2048]
+[B, segment_frames, 16, 16, 2048]
     -> flatten spatial and frame axes
-[B, 2048, 2048]
+[B, segment_frames * 256, 2048]
     -> projection
-[B, 2048, 512]
+[B, segment_frames * 256, 512]
 ```
 
 The full `37 x 37` patch grid remains available to DPT. Writer pooling must not
@@ -217,8 +241,8 @@ alter DPT's spatial features.
 E01a uses position information relative to the current segment, not an
 absolute segment-number embedding:
 
-- the eight camera context tokens receive learned within-segment temporal
-  embeddings for positions `0..7`
+- each camera context token receives a learned within-segment temporal
+  embedding for its position `0..segment_frames-1`
 - every pooled patch token receives the sum of the same learned temporal
   embedding for its frame and a fixed two-dimensional sinusoidal embedding for
   its `16 x 16` pooled spatial location
@@ -244,8 +268,8 @@ and previous memory as distinct tokens allows attention to select between them
 instead of irreversibly mixing them with elementwise addition.
 
 Camera context and patch context are processed by separate cross-attention
-operations. This avoids making the eight per-frame camera tokens compete in a
-single softmax with approximately 2,048 pooled patch tokens.
+operations. This avoids making the per-frame camera tokens compete in a
+single softmax with `segment_frames * 256` pooled patch tokens.
 
 ## Memory writer
 
@@ -353,7 +377,7 @@ and `17` remain unchanged and are passed directly to DPT.
 The adaptor preserves the number and ordering of patch tokens:
 
 ```text
-[B, 8, 1369, 2048] -> [B, 8, 1369, 2048]
+[B, segment_frames, 1369, 2048] -> [B, segment_frames, 1369, 2048]
 ```
 
 Consequently, DPT can continue reshaping the patch tokens into its expected
@@ -408,18 +432,19 @@ and `forward_segment` for exactly one already-normalized segment; incoming
 memory remains an explicit required argument.
 
 The recurrent sequence orchestrator does not accept raw frames and does not
-split, normalize, or transfer data. It consumes exactly three ordered,
+split, normalize, or transfer data. It consumes exactly `num_segments` ordered,
 independently normalized segment mappings yielded by the outer episode
-pipeline. Each yielded segment contains `images` shaped `[B, 8, 3, H, W]` on
-its final device and in its final dtype. The orchestrator creates the learned
-initial memory once, invokes the model through its standard module call for
-each segment in order, and returns the three prediction and diagnostic
-dictionaries plus memory states `m[0]` through `m[3]`. It must not calculate
-losses, call backward, or perform optimizer operations.
+pipeline. Each yielded segment contains `images` shaped
+`[B, segment_frames, 3, H, W]` on its final device and in its final dtype. The
+orchestrator creates the learned initial memory once, invokes the model through
+its standard module call for each segment in order, and returns
+`num_segments` prediction and diagnostic dictionaries plus memory states
+`m[0]` through `m[num_segments]`. It must not calculate losses, call backward,
+or perform optimizer operations.
 
 Production preprocessing yields prepared segments just in time. Unit tests may
-materialize the three prepared mappings in a list, but the training path must
-not normalize or copy all three segments to the accelerator before segment 0
+materialize prepared mappings in a list, but the training path must not
+normalize or copy future segments to the accelerator before segment 0
 is processed. Training and loss-aggregation policy remain outside the segment
 model and sequence orchestrator.
 
@@ -431,13 +456,14 @@ place.
 
 ## Streaming and normalization contract
 
-An E01a sample is an ordered episode of exactly 24 raw frames divided into
-three consecutive, non-overlapping segments:
+An E01a sample is an ordered episode of `episode_frames` raw frames divided into
+`num_segments` consecutive, non-overlapping segments of `segment_frames` frames.
+The active five-frame, three-segment profile is:
 
 ```text
-segment 0: raw frames  0..7
-segment 1: raw frames  8..15
-segment 2: raw frames 16..23
+segment 0: raw frames  0..4
+segment 1: raw frames  5..9
+segment 2: raw frames 10..14
 ```
 
 The split occurs before `normalize_camera_extrinsics_and_points_batch` and
@@ -448,7 +474,7 @@ frames or data-derived sequence statistics occurs only after the current
 segment has been isolated. Each segment is normalized independently when it
 arrives:
 
-1. slice all frame-indexed fields to the current eight frames
+1. slice all frame-indexed fields to the current `segment_frames` frames
 2. use that segment's first camera as its coordinate origin
 3. compute the average-distance scale only from valid points in that segment
 4. transform that segment's extrinsics, camera points, world points, and depths
@@ -460,7 +486,7 @@ The aggregator's fixed ImageNet RGB mean/std transform is also applied only
 when that segment enters `Aggregator.forward`; it does not create a
 cross-segment statistic.
 
-Consequently, the three segments generally use different coordinate frames and
+Consequently, the segments generally use different coordinate frames and
 scales. This is intentional: E01a models an online stream, and recurrent memory
 must tolerate the coordinate reset without receiving a future-derived
 alignment transform. Training losses use each segment's normalized frame. An
@@ -468,13 +494,13 @@ offline evaluator may invert each segment's recorded normalization to express
 all predictions in the raw VKITTI frame, then align the complete episode as
 specified below. No such conversion or alignment enters model execution.
 
-The outer episode pipeline may receive all 24 raw frames from the current
+The outer episode pipeline may receive all `episode_frames` raw frames from the current
 dataloader in one CPU batch for compatibility. It splits that CPU episode
 first, then prepares and yields only the current segment to the recurrent
 orchestrator. Splitting, segment-local normalization, and device transfer stay
 outside the orchestrator and occur just in time. A test must prove that
-changing frames `8..23` cannot change normalized data, features, predictions,
-or loss for segment 0.
+changing frames `segment_frames..episode_frames-1` cannot change normalized
+data, features, predictions, or loss for segment 0.
 
 ## Dataset protocol
 
@@ -484,12 +510,12 @@ sampling behavior is not valid for this experiment.
 
 The E01a sequential adapter must:
 
-- sample exactly 24 consecutive frames from one VKITTI scene, variation, and
+- sample exactly `episode_frames` consecutive frames from one VKITTI scene, variation, and
   camera stream
 - keep frame IDs strictly increasing with stride `1`
 - disallow duplicated or randomly permuted frame IDs
-- choose only start indices for which all 24 frames exist
-- preserve the same scene/variation/camera identity across all three segments
+- choose only start indices for which all `episode_frames` frames exist
+- preserve the same scene/variation/camera identity across all segments
 - return frame IDs and segment indices for audit logging
 - disable tracking data and the point prediction branch
 
@@ -499,7 +525,7 @@ The fixed scene-disjoint split is:
 - validation: `Scene20`
 
 All weather/lighting variations and both camera streams may be used, but a
-single 24-frame sample cannot cross a variation or camera boundary. Validation
+single episode cannot cross a variation or camera boundary. Validation
 uses fixed start indices and no random augmentation. The initial E01a profile
 also disables training-time random scale, color, grayscale, blur, orientation,
 and frame-order augmentation so that recurrence is the controlled change.
@@ -508,17 +534,30 @@ remain enabled.
 
 Before the real-data run, the sequential adapter must pass a small real-sample
 inspection that verifies image/depth shapes, strictly ordered IDs, finite
-camera/depth targets, and the three independent segment normalizations.
+camera/depth targets, and the independent segment normalizations.
 
 ## Slice 8: real-data training smoke test
 
 Use the configured sequential VKITTI source and production model on a real
-24-frame episode. Execute the existing three-segment preparation, forward,
+`episode_frames`-frame episode. The active smoke profile has five frames per
+segment and three segments. Execute
+the ordered segment preparation, forward,
 loss, full-BPTT backward, gradient clipping, both AdamW parameter groups,
 scheduler, and one optimizer update. Save a checkpoint, reload it, and complete
 one further update. Keep the run small; it establishes pipeline correctness,
 not convergence or scientific quality. Use offline logging and record the
 exact data/checkpoint configuration, elapsed time, and peak GPU memory.
+
+The first 24-frame `3 x 8` attempt ran out of GPU memory during the depth-head
+forward pass before backward or optimizer update. The failing segment was not
+identified. The active smoke must record the segment index and allocated/peak
+GPU memory at segment entry and before the depth head. A resumed attempt at
+six frames per segment ran out of GPU memory in the final segment's depth-head
+forward after restoring AdamW state. The five-frame, three-segment two-phase
+run completed; its evidence is
+`/var/tmp/rm-vggt-slice08-3x5-20261004-01/summary.json` on `isp_tesla`. It
+establishes two-update pipeline feasibility at 15 frames, subject to review.
+It does not establish that longer schedules fit or pass.
 
 Acceptance requires strictly consecutive frame IDs, the expected shapes and
 segment order, finite losses and gradients, nonzero reachable gradients and
@@ -540,7 +579,7 @@ identity, scene/variation/camera, exact frame IDs, predictions, required
 geometry metadata, per-episode results, and aggregate results. Its production
 entry point and symbols use capability-based names.
 
-Training normalizes each eight-frame segment independently. Before alignment,
+Training normalizes each configured segment independently. Before alignment,
 decode each predicted pose into OpenCV camera-from-world extrinsics, derive
 camera centers, and convert predicted poses and depth-derived world points from
 their segment-local coordinates to the raw VKITTI coordinate frame by inverting
@@ -551,8 +590,9 @@ geometry, and the corresponding image pixel/intrinsic convention to derive
 predicted 3D points. Check identity, shape, frame order, finite values, and
 coordinate conventions before fitting an alignment.
 
-Fit exactly one reflection-free Sim(3), with positive scale, from the 24
-predicted camera centers to their 24 ground-truth camera centers. Apply that
+Fit exactly one reflection-free Sim(3), with positive scale, from the
+`episode_frames` predicted camera centers to their corresponding ground-truth
+camera centers. Apply that
 same transform to every predicted camera center, orientation/pose, and
 depth-derived point in the episode. Do not fit a separate alignment per
 segment or for the point cloud. A degenerate camera trajectory or failed fit
@@ -560,7 +600,7 @@ is an explicit evaluation failure, not a silent change of alignment policy.
 No ATE or point RMSE is computed before this episode-level alignment.
 
 Translation ATE is the root mean square Euclidean distance between aligned
-predicted and ground-truth camera centers over the 24 corresponding frames.
+predicted and ground-truth camera centers over the corresponding episode frames.
 Point error is the Euclidean distance between the aligned predicted and
 ground-truth 3D points at the same valid frame/pixel location. Point RMSE is
 the square root of the mean squared point error across all valid
@@ -599,7 +639,7 @@ before this slice closes.
 
 ## Full-BPTT sequence training
 
-E01a uses full backpropagation through time across all three segments. This is
+E01a uses full backpropagation through time across all configured segments. This is
 the only accepted training mode for the first experiment.
 
 For incoming memory `m[t]`, frozen current features `f[t]`, prediction function
@@ -610,13 +650,13 @@ pred[t] = P(f[t], m[t])
 m[t+1]  = W(f[t], m[t])
 ```
 
-The trainable graph remains connected through `m[1]` and `m[2]`. Neither state
-is detached, cloned into a new leaf, converted through NumPy, or updated in
-place. The three weighted segment losses are accumulated into one scalar and
-backward is called once:
+The trainable graph remains connected through every inter-segment memory state.
+No state is detached, cloned into a new leaf, converted through NumPy, or
+updated in place. The equally weighted segment losses are accumulated into one
+scalar and backward is called once:
 
 ```text
-L_sequence = (L[0] + L[1] + L[2]) / 3
+L_sequence = sum(L[t] for t in 0..num_segments-1) / num_segments
 ```
 
 This makes the gradient entering each memory equal to the sum of its local
@@ -627,8 +667,8 @@ particular:
   writer through its unused output
 - `L[1]` trains the segment-0 writer through `m[1]`
 - `L[2]` trains the segment-0 and segment-1 writers through `m[2]`
-- the segment-2 writer output `m[3]` is returned for interface consistency but
-  has no future-loss contribution in a fixed three-segment episode
+- the final writer output `m[num_segments]` is returned for interface
+  consistency but has no future-loss contribution in a fixed-length episode
 
 The writer parameters are shared across segments, so their gradients accumulate
 from every transition that affects a later loss. Detaching at every segment
@@ -648,15 +688,23 @@ normalization:
 - track loss disabled
 - no auxiliary memory, reconstruction, gate, or specialization loss
 
+The currently implemented inherited camera loss uses the first frame's point
+mask to decide whether to supervise an entire segment. If that frame has 100
+or fewer valid points, its camera loss is zero while depth loss still
+contributes. It does not skip the episode or optimizer update. This behavior
+is retained for the immediate exploratory run so that no unimplemented
+eligibility change is mistaken for current behavior. The proposed whole-episode
+skip policy is a later design and implementation follow-up.
+
 Each `L[t]` is the segment-local `objective` returned by `MultitaskLoss`. Equal
-weighting is deliberate because all segments contain eight frames. Data-driven
-depth filtering remains segment-local; it must not compute a quantile over all
-24 frames.
+weighting is deliberate because all segments contain `segment_frames` frames.
+Data-driven depth filtering remains segment-local; it must not compute a
+quantile over all `episode_frames` frames.
 
 Training logs both the arithmetic mean and each segment's individual camera,
 depth, and objective terms. Segment 0 is reported separately as the no-history
-control position; recurrent improvement is expected, if present, primarily in
-segments 1 and 2.
+control position; recurrent improvement is expected, if present, in later
+segments.
 
 ## Optimization and precision
 
@@ -674,7 +722,7 @@ The accepted E01a defaults are:
 - initial per-device episode batch size: `1`
 - gradient accumulation: `1` until the one-episode path is validated; later
   changes must scale `L_sequence` once, not each segment independently
-- optimizer update: exactly once after the complete three-segment backward
+- optimizer update: exactly once after the complete episode backward
 - training budget: 20 epochs with at most 800 training episodes per epoch
 - validation: every epoch with at most 400 fixed validation episodes
 - checkpoint: every epoch plus the lowest aggregate validation-objective model
@@ -696,7 +744,7 @@ logging may remain as a secondary sink.
 E01a requires a memory-disabled segmented control with the same:
 
 - sequential VKITTI samples and scene split
-- `3 x 8` streaming schedule
+- identical configured streaming schedule (currently three segments of five frames)
 - independent per-segment normalization
 - frozen aggregator
 - trainable camera and depth heads
@@ -712,26 +760,30 @@ be identified separately from the primary memory-disabled control.
 
 ## Validation and acceptance criteria
 
-Implementation acceptance requires all of the following:
+The following criteria define eventual experiment acceptance. The later
+one-sample overfit and review follow-ups are not prerequisites for starting the
+exploratory training run described above:
 
-1. Config loading fixes `total_frames=24`, `segment_frames=8`,
-   `num_segments=3`, and `backprop_mode=full`.
-2. The sequential adapter returns 24 strictly increasing, non-duplicated frame
-   IDs from one sequence.
+1. Config loading uses configurable `segment_frames` and `num_segments`, with
+   `episode_frames` equal to their product under the existing pipeline
+   validation, and `backprop_mode=full`. The active smoke resolves to three
+   segments of five frames and 15 episode frames.
+2. The sequential adapter returns `episode_frames` strictly increasing,
+   non-duplicated frame IDs from one sequence.
 3. Each segment's normalized first extrinsic is identity up to tolerance and
    each scale is computed from that segment alone.
-4. A future-isolation test shows that modifying segments 1 or 2 cannot change
-   segment-0 normalized tensors or forward outputs.
+4. A future-isolation test shows that modifying any later segment cannot
+   change segment-0 normalized tensors or forward outputs.
 5. Forward shapes match the memory, camera, depth, and patch-grid contracts.
-6. `m[1]` and `m[2]` retain autograd history during training; no detach occurs
-   at their boundaries.
-7. A loss using only segment 2 produces nonzero gradients in writer operations
-   executed for segments 0 and 1.
+6. Each inter-segment memory state retains autograd history during training;
+   no detach occurs at its boundary.
+7. A loss using only the final segment produces nonzero gradients in writer
+   operations executed for earlier segments.
 8. Aggregator parameters remain unchanged, have `requires_grad=False`, and have
    no gradients after backward.
 9. Camera/depth heads, both adaptors, writer, learned initial memory, and
    residual/keep gates receive finite gradients where reachable.
-10. One complete 24-frame episode performs exactly one backward and one
+10. One complete configured episode performs exactly one backward and one
     optimizer update without NaN or Inf.
 11. Memory resets between independent episodes and validation samples.
 12. Checkpoint save/load restores all trainable E01 parameters, optimizer,
@@ -744,6 +796,35 @@ least three seeds, per-segment and aggregate losses/metrics, trainable parameter
 counts, runtime, and peak VRAM. No improvement claim is made from the synthetic
 fixture or one-sample overfit test.
 
+## Deferred review findings for the exploratory run
+
+The following findings remain open. They do not prevent launching the
+five-frame, three-segment exploratory experiment, but they limit what its
+results can establish and must be addressed before a final scientific claim:
+
+1. The inherited camera loss uses only each segment's first-frame point mask
+   to decide camera supervision for all its frames. It can omit valid later
+   frames or supervise invalid ones. No whole-episode skip policy has been
+   implemented. Record this inherited behavior when interpreting camera loss;
+   changing it requires a separately reviewed loss-policy update.
+2. In the ordinary trainer's float16 AMP path, `GradScaler` may skip AdamW on
+   nonfinite gradients while `completed_updates` and schedule progress still
+   advance. The audited two-phase smoke verified actual optimizer steps, but
+   that diagnostic does not make the ordinary long-run accounting correct.
+   Treat update counts as provisional if overflow occurs, and do not infer
+   that every counted attempt changed weights until the accounting is fixed.
+3. The completed smoke reported nonzero gradients in 23 of 41 depth-read-
+   adaptor parameter tensors in phase A and only the residual gate in phase B.
+   AdamW momentum and weight decay can change weights even when current
+   gradients are zero. This is a training-signal question, not proof of a
+   broken update; diagnose it before claiming that the adaptor body learns
+   reliably.
+
+The exploratory run should retain its raw logs, resolved config, checkpoints,
+losses, learning rates, runtime, and memory evidence. A successful launch or
+decreasing loss does not close these follow-ups, establish a controlled
+comparison, or validate the longer eight-frame-per-segment scale-up.
+
 ## Implementation sequence
 
 Implementation proceeds in small verified slices:
@@ -752,10 +833,12 @@ Implementation proceeds in small verified slices:
 2. add `MemoryWriter` with shape, gate, and recurrence tests
 3. add camera and depth read adaptors with residual and layout tests
 4. compose the frozen-aggregator segment model
-5. add the three-segment full-BPTT orchestrator and cross-segment gradient tests
+5. add the configurable-segment full-BPTT orchestrator and cross-segment gradient tests
 6. integrate the existing loss, optimizer groups, logging, and checkpoint path
 7. add the sequential VKITTI adapter and real-sample inspection
-8. run the real VKITTI end-to-end training and checkpoint-resume smoke test
+8. make frame counts configurable, then run the real VKITTI end-to-end
+   training and checkpoint-resume smoke test at the active five-frame,
+   three-segment schedule
 9. add and test offline episode-level Sim(3)-aligned ATE and point RMSE
 10. add and test point-cloud visualization based on existing utilities
 11. run one-sample overfit, then the controlled multi-seed experiment
@@ -781,12 +864,12 @@ E01a must preserve the following:
 - No LoRA or aggregator unfreezing is part of E01a.
 - Raw data is split before geometric normalization, device transfer, and model
   execution.
-- Every eight-frame segment defines its own first-camera coordinate frame and
+- Every segment defines its own first-camera coordinate frame and
   valid-point scale without future-segment information.
 - Segment order is fixed and only recurrent memory crosses a segment boundary.
 - Memory resets at independent episode boundaries.
-- Full BPTT spans `m[1]` and `m[2]`; neither boundary is detached.
-- All three segment objectives have equal weight and produce one sequence-level
+- Full BPTT spans every inter-segment memory boundary; none is detached.
+- All segment objectives have equal weight and produce one sequence-level
   backward call and optimizer update.
 - The model and its segment `forward` methods never call backward internally.
 
@@ -805,10 +888,16 @@ E01a must preserve the following:
 - Independently re-centering and rescaling each segment removes a shared output
   coordinate system. Memory must learn useful latent information across these
   changes without being given an explicit inter-segment transform.
-- The final transition to `m[3]` receives no future-loss supervision in a
-  fixed-length three-segment episode.
-- Full BPTT retains trainable camera/DPT/writer/adaptor activations for all three
-  segments and may exceed the target GPU budget at `518 x 518`.
+- The final transition to `m[num_segments]` receives no future-loss supervision
+  in a fixed-length episode.
+- Full BPTT retains trainable camera/DPT/writer/adaptor activations for all
+  configured segments and may exceed the target GPU budget at `518 x 518`.
+- In the completed five-frame, three-segment smoke, the depth read adaptor had
+  nonzero gradients in 23 of 41 parameter tensors on the first update but
+  only its residual gate on the resumed update. AdamW momentum and weight
+  decay can change parameters without a nonzero current gradient. Diagnose
+  this pattern before claiming that the adaptor body learns reliably in a
+  longer run; the two successful optimizer steps alone do not settle it.
 - The initial `0.1` adaptor residual gates trade exact baseline equivalence for
   immediate gradient flow into the new memory path.
 - A scene-disjoint VKITTI split has few validation scenes, so multi-seed
@@ -820,8 +909,12 @@ E01a must preserve the following:
 
 - Experiment family: `E01_frozen_aggregator_with_crossattn_rmt_adaptor`
 - First concrete configuration: `E01a`
-- `E01a` means full three-segment BPTT with the data, normalization, loss, and
-  optimizer contracts in this document.
-- Memory replay backpropagation, truncated BPTT, a different coordinate
-  normalization policy, or a different segment schedule requires a subsequent
-  experiment identifier such as `E01b`; none is defined here.
+- `E01a` means full episode BPTT with the data, normalization, loss, and
+  optimizer contracts in this document. Its active feasibility profile is
+  five frames per segment and three segments; the eight-frame-per-segment
+  scale-up remains unverified.
+- Frame schedule is a logged configuration dimension. Results from different
+  schedules must be labeled and evaluated separately, never pooled as one
+  controlled comparison. Memory replay backpropagation, truncated BPTT, or a
+  different coordinate normalization policy requires a subsequent experiment
+  identifier such as `E01b`; none is defined here.

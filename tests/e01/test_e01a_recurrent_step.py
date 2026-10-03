@@ -182,7 +182,7 @@ def test_e01a_train_step_is_lazy_single_update_and_full_bptt() -> None:
     wrapper.zero_grad = lambda *args, **kwargs: (zeroes.append(kwargs.get("set_to_none")), original_zero(*args, **kwargs))[1]
     original = wrapper.step_schedulers
     wrapper.step_schedulers = lambda progress: (schedules.append(progress), original(progress))[1]
-    result = run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=False, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25)
+    result = run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=False, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25, num_segments=3, segment_frames=8)
     assert result.losses.objective.detach().item() == pytest.approx(sum(item["objective"].item() for item in result.losses.segment_losses) / 3)
     assert scaler.events == ["scale", "backward", "unscale", "step", "update"]
     assert clipper.calls == 1 and schedules == [.25]
@@ -200,7 +200,7 @@ def test_e01a_nonfinite_objective_prevents_all_mutation() -> None:
     wrapper = construct_optimizer_for_component_groups(model, _conf(), _specs(model))
     wrapper.step_schedulers = lambda _progress: pytest.fail("scheduler must not run")
     with pytest.raises(ValueError, match="finite"):
-        run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=lambda _p, _s: {"objective": torch.tensor(float("nan"))}, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=False, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25)
+        run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=lambda _p, _s: {"objective": torch.tensor(float("nan"))}, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=False, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25, num_segments=3, segment_frames=8)
     assert scaler.events == [] and clipper.calls == 0
 
 
@@ -210,6 +210,6 @@ def test_e01a_cpu_bfloat16_autocast_smoke_path() -> None:
         pytest.skip("CPU bfloat16 autocast is unavailable")
     model, scaler, clipper = _Model(), _Scaler(), _Clipper()
     wrapper = construct_optimizer_for_component_groups(model, _conf(), _specs(model))
-    result = run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=True, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25)
+    result = run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=True, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25, num_segments=3, segment_frames=8)
     assert torch.isfinite(result.losses.objective)
 
