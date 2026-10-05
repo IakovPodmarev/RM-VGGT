@@ -52,6 +52,8 @@ class SequentialVKittiEpisodeSource:
     The root is inspected on first use. The manifest contains only windows
     whose RGB, depth, intrinsic, and extrinsic identities all agree. Construction
     and iteration do not write to the dataset or use global random state.
+    Every emitted frame has a matched, finite camera label; missing camera rows
+    exclude windows before loading, so an explicit validity mask is unnecessary.
     """
 
     def __init__(

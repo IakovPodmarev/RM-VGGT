@@ -96,7 +96,7 @@ def test_config_composes_source_targets() -> None:
 
     assert cfg.episode_sources.train._target_ == "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource"
     assert cfg.episode_sources.validation._target_ == "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource"
-    assert (cfg.sequence.total_frames, cfg.sequence.segment_frames, cfg.sequence.num_segments) == (9, 3, 3)
+    assert (cfg.sequence.total_frames, cfg.sequence.segment_frames, cfg.sequence.num_segments) == (15, 5, 3)
 
 
 def test_scene_filtering_ordering_and_cpu_raw_contract(root: Path) -> None:
@@ -155,7 +155,7 @@ def test_camera_identity_read_only_processing_and_split_boundary(root: Path) -> 
     torch.testing.assert_close(raw["intrinsics"], same["intrinsics"])
     assert [segment["segment_index"] for segment in segments] == [0, 1, 2]
     assert all(segment["original_sizes"].shape[1] == 8 for segment in segments)
-    assert all(segment[field].shape[1] == 8 for segment in segments for field in FRAME_INDEXED_FIELDS)
+    assert all(segment[field].shape[1] == 8 for segment in segments for field in FRAME_INDEXED_FIELDS if field in segment)
     assert [segment["seq_name"] for segment in prepared] == [raw["seq_name"]] * 3
 
 
@@ -224,7 +224,7 @@ def test_finite_camera_value_overflowing_float32_has_frame_context(tmp_path: Pat
 
 
 
-def test_active_config_selects_nine_frame_windows_and_three_prepared_segments(
+def test_active_config_selects_fifteen_frame_windows_and_three_prepared_segments(
     root: Path,
 ) -> None:
     """The configured proof-of-concept schedule reaches source and inspector."""
@@ -243,6 +243,6 @@ def test_active_config_selects_nine_frame_windows_and_three_prepared_segments(
         num_segments=cfg.sequence.num_segments,
     )
     for phase in ("train", "validation"):
-        assert len(report[phase]["frame_ids"]) == 9
+        assert len(report[phase]["frame_ids"]) == 15
         assert report[phase]["segment_indices"] == [0, 1, 2]
-        assert report[phase]["segment_frame_counts"] == [3, 3, 3]
+        assert report[phase]["segment_frame_counts"] == [5, 5, 5]

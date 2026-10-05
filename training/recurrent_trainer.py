@@ -312,6 +312,7 @@ class RecurrentTrainer:
         }
         self.next_epoch = 0
         self.completed_updates = 0
+        self.skipped_attempts = 0
         self.best_validation_objective = math.inf
         self.checkpoint_dir = Path(cfg["checkpoint"]["save_dir"])
         self.run_metadata = {
@@ -421,7 +422,10 @@ class RecurrentTrainer:
                 segment_frames=self.segment_frames,
                 diagnostic=self.diagnostic,
             )
-            self.completed_updates += 1
+            if result.optimizer_ran:
+                self.completed_updates += 1
+            else:
+                self.skipped_attempts += 1
             elapsed, peak = self._measure_end(start)
             metrics = _metrics(result.losses, recorded, weights=self.loss_weights, diagnostics=result.sequence.diagnostics)
             metrics.update({
@@ -429,6 +433,8 @@ class RecurrentTrainer:
                 "peak_memory_bytes": peak,
                 "gradient_norm": _scalar(result.gradient_norm) if result.gradient_norm is not None else None,
                 "scheduler_progress": self.completed_updates / self.scheduled_updates,
+                "optimizer_ran": result.optimizer_ran,
+                "skipped_attempts": self.skipped_attempts,
             })
             for group in self.optimizer.optimizer.param_groups:
                 metrics[f"learning_rate/{group['name']}"] = float(group["lr"])
@@ -477,6 +483,7 @@ class RecurrentTrainer:
             "completed_epoch": completed_epoch,
             "next_epoch": completed_epoch + 1,
             "completed_updates": self.completed_updates,
+            "skipped_attempts": self.skipped_attempts,
             "validation_objective": float(validation_objective),
             "best_validation_objective": self.best_validation_objective,
             "config": self.config,
@@ -490,10 +497,10 @@ class RecurrentTrainer:
     def resume_from_checkpoint(self, checkpoint_path: str | Path) -> None:
         """Strictly restore an epoch boundary without retaining recurrent state.
 
-        The saved optimizer group values, moments and steps, scaler state
-        (including an empty disabled state), counters, and RNG are restored.
-        Progress-based schedulers have no separate state object: their config,
-        budget and saved progress must agree before model state is changed.
+        Restore optimizer groups, moments and steps, scaler state, completed
+        updates, skipped attempts, and RNG. Older checkpoints without a skipped
+        count restore that count as zero. Reject incompatible schedule settings,
+        progress, or a negative skipped count. Recurrent memory is not restored.
         """
         state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         required = {
@@ -524,6 +531,9 @@ class RecurrentTrainer:
         self.scaler.load_state_dict(state["scaler"])
         self.next_epoch = int(state["next_epoch"])
         self.completed_updates = int(state["completed_updates"])
+        self.skipped_attempts = int(state.get("skipped_attempts", 0))
+        if self.skipped_attempts < 0:
+            raise ValueError("resume checkpoint skipped attempts are invalid")
         self.best_validation_objective = float(state["best_validation_objective"])
         self.run_metadata = dict(state["run_metadata"])
         _restore_rng(state["rng_state"])

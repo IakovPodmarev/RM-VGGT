@@ -392,6 +392,7 @@ def execute_phase(
         num_segments=cfg.sequence.num_segments,
         expected_rates=_scheduled_rates(cfg, progress),
         expected_decay=float(cfg.optim.optimizer.weight_decay),
+        precision=preflight_result["precision"],
     )
     started = time.perf_counter()
     stage = "trainer construction"

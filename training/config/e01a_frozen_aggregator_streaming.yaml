@@ -16,7 +16,7 @@ episode_batch_size: 1
 e01a:
   experiment_id: E01a
   total_frames: ${frame_product:${e01a.segment_frames},${e01a.num_segments}}
-  segment_frames: 3
+  segment_frames: 5
   num_segments: 3
   backprop_mode: full
   memory_enabled: true

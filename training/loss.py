@@ -88,74 +88,77 @@ class MultitaskLoss(torch.nn.Module):
 
 
 def compute_camera_loss(
-    pred_dict,  # predictions dict, contains pose encodings
-    batch_data,  # ground truth and mask batch dict
-    loss_type="l1",  # "l1" or "l2" loss
-    gamma=0.6,  # temporal decay weight for multi-stage training
+    pred_dict,
+    batch_data,
+    loss_type="l1",
+    gamma=0.6,
     pose_encoding_type="absT_quaR_FoV",
-    weight_trans=1.0,  # weight for translation loss
-    weight_rot=1.0,  # weight for rotation loss
-    weight_focal=0.5,  # weight for focal length loss
+    weight_trans=1.0,
+    weight_rot=1.0,
+    weight_focal=0.5,
     **kwargs,
 ):
-    # List of predicted pose encodings per stage
-    pred_pose_encodings = pred_dict["pose_enc_list"]
-    # Binary mask for valid points per frame (B, N, H, W)
-    point_masks = batch_data["point_masks"]
-    # Only consider frames with enough valid points (>100)
-    valid_frame_mask = point_masks[:, 0].sum(dim=[-1, -2]) > 100
-    # Number of prediction stages
-    n_stages = len(pred_pose_encodings)
+    """Average camera error over camera-valid frames, independent of point masks.
 
-    # Get ground truth camera extrinsics and intrinsics
+    An optional boolean camera_valid_mask has shape [batch, frames].
+    An absent mask represents an adaptor guarantee that all emitted camera
+    targets are valid. Empty eligibility, malformed shapes, nonfinite marked
+    targets, and nonpositive marked focal lengths raise ValueError.
+    """
+    pred_pose_encodings = pred_dict["pose_enc_list"]
+    if not pred_pose_encodings:
+        raise ValueError("camera predictions must contain at least one stage")
     gt_extrinsics = batch_data["extrinsics"]
     gt_intrinsics = batch_data["intrinsics"]
-    image_hw = batch_data["images"].shape[-2:]
-
-    # Encode ground truth pose to match predicted encoding format
+    images = batch_data["images"]
+    if gt_extrinsics.ndim != 4 or gt_extrinsics.shape[-2:] != (3, 4):
+        raise ValueError("camera extrinsics must have shape [B, frames, 3, 4]")
+    batch_frames = gt_extrinsics.shape[:2]
+    if gt_intrinsics.shape != (*batch_frames, 3, 3):
+        raise ValueError("camera intrinsics must align with extrinsics")
+    if images.ndim != 5 or images.shape[:2] != batch_frames:
+        raise ValueError("camera images must align with targets")
+    valid_frame_mask = batch_data.get("camera_valid_mask")
+    if valid_frame_mask is None:
+        valid_frame_mask = torch.ones(batch_frames, dtype=torch.bool, device=gt_extrinsics.device)
+    elif (
+        not torch.is_tensor(valid_frame_mask)
+        or valid_frame_mask.dtype != torch.bool
+        or valid_frame_mask.shape != batch_frames
+        or valid_frame_mask.device != gt_extrinsics.device
+    ):
+        raise ValueError("camera_valid_mask must be a frame-aligned boolean [B, frames] tensor")
+    if not valid_frame_mask.any():
+        raise ValueError("segment has no valid camera labels")
+    selected_extrinsics = gt_extrinsics[valid_frame_mask].unsqueeze(1)
+    selected_intrinsics = gt_intrinsics[valid_frame_mask].unsqueeze(1)
+    if not torch.isfinite(selected_extrinsics).all() or not torch.isfinite(selected_intrinsics).all():
+        raise ValueError("valid camera targets must be finite")
+    if (selected_intrinsics[..., 0, 0] <= 0).any() or (selected_intrinsics[..., 1, 1] <= 0).any():
+        raise ValueError("valid camera focal lengths must be positive")
     gt_pose_encoding = extri_intri_to_pose_encoding(
-        gt_extrinsics, gt_intrinsics, image_hw, pose_encoding_type=pose_encoding_type
-    )
-
-    # Initialize loss accumulators for translation, rotation, focal length
+        selected_extrinsics, selected_intrinsics, images.shape[-2:],
+        pose_encoding_type=pose_encoding_type,
+    ).squeeze(1)
+    n_stages = len(pred_pose_encodings)
     total_loss_T = total_loss_R = total_loss_FL = 0
-
-    # Compute loss for each prediction stage with temporal weighting
-    for stage_idx in range(n_stages):
-        # Later stages get higher weight (gamma^0 = 1.0 for final stage)
+    for stage_idx, pred_pose_stage in enumerate(pred_pose_encodings):
+        if pred_pose_stage.shape != (*batch_frames, gt_pose_encoding.shape[-1]):
+            raise ValueError("camera prediction stage must align with camera targets")
         stage_weight = gamma ** (n_stages - stage_idx - 1)
-        pred_pose_stage = pred_pose_encodings[stage_idx]
-
-        if valid_frame_mask.sum() == 0:
-            # If no valid frames, set losses to zero to avoid gradient issues
-            loss_T_stage = (pred_pose_stage * 0).mean()
-            loss_R_stage = (pred_pose_stage * 0).mean()
-            loss_FL_stage = (pred_pose_stage * 0).mean()
-        else:
-            # Only consider valid frames for loss computation
-            loss_T_stage, loss_R_stage, loss_FL_stage = camera_loss_single(
-                pred_pose_stage[valid_frame_mask].clone(),
-                gt_pose_encoding[valid_frame_mask].clone(),
-                loss_type=loss_type,
-            )
-        # Accumulate weighted losses across stages
+        loss_T_stage, loss_R_stage, loss_FL_stage = camera_loss_single(
+            pred_pose_stage[valid_frame_mask],
+            gt_pose_encoding,
+            loss_type=loss_type,
+        )
         total_loss_T += loss_T_stage * stage_weight
         total_loss_R += loss_R_stage * stage_weight
         total_loss_FL += loss_FL_stage * stage_weight
-
-    # Average over all stages
     avg_loss_T = total_loss_T / n_stages
     avg_loss_R = total_loss_R / n_stages
     avg_loss_FL = total_loss_FL / n_stages
-
-    # Compute total weighted camera loss
-    total_camera_loss = (
-        avg_loss_T * weight_trans + avg_loss_R * weight_rot + avg_loss_FL * weight_focal
-    )
-
-    # Return loss dictionary with individual components
     return {
-        "loss_camera": total_camera_loss,
+        "loss_camera": avg_loss_T * weight_trans + avg_loss_R * weight_rot + avg_loss_FL * weight_focal,
         "loss_T": avg_loss_T,
         "loss_R": avg_loss_R,
         "loss_FL": avg_loss_FL,

@@ -16,7 +16,7 @@ if str(TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(TRAINING_ROOT))
 
 from launch import load_config
-from loss import MultitaskLoss
+from loss import MultitaskLoss, compute_camera_loss
 from training.recurrent_loss import compute_recurrent_losses as _compute_recurrent_losses
 from training.recurrent_sequence import RecurrentSequenceResult
 
@@ -240,3 +240,91 @@ def test_e01a_recurrent_loss_never_calls_backward(monkeypatch: pytest.MonkeyPatc
     compute_recurrent_losses(sequence, targets, _RecordingLoss(loss_mappings))
 
     assert calls == 0
+
+def _camera_fixture() -> tuple[dict, dict]:
+    """Return two valid camera targets and differentiable pose predictions."""
+    extrinsics = torch.zeros(1, 2, 3, 4)
+    extrinsics[..., :3, :3] = torch.eye(3)
+    intrinsics = torch.eye(3).view(1, 1, 3, 3).expand(1, 2, -1, -1).clone()
+    target = {
+        "images": torch.ones(1, 2, 3, 4, 4),
+        "extrinsics": extrinsics,
+        "intrinsics": intrinsics,
+        "point_masks": torch.zeros(1, 2, 4, 4, dtype=torch.bool),
+    }
+    from vggt.utils.pose_enc import extri_intri_to_pose_encoding
+    pose = extri_intri_to_pose_encoding(extrinsics, intrinsics, (4, 4)).detach()
+    predicted = pose.clone()
+    predicted[0, 0, 0] += 2
+    predicted[0, 1, 0] += 4
+    predicted.requires_grad_()
+    return {"pose_enc_list": [predicted]}, target
+
+
+def test_camera_loss_uses_valid_camera_frames_with_sparse_first_depth() -> None:
+    """First-frame depth sparsity cannot disable otherwise valid camera labels."""
+    prediction, target = _camera_fixture()
+    target["point_masks"][:, 1] = True
+    result = compute_camera_loss(prediction, target)
+    torch.testing.assert_close(result["loss_T"], torch.tensor(1.0))
+    result["loss_camera"].backward()
+    assert prediction["pose_enc_list"][0].grad[0, 0, 0] != 0
+    assert prediction["pose_enc_list"][0].grad[0, 1, 0] != 0
+
+
+def test_camera_loss_explicit_mask_selects_frames_and_validates_targets() -> None:
+    """Masked invalid targets are ignored; marked nonfinite or bad focal targets fail."""
+    prediction, target = _camera_fixture()
+    target["camera_valid_mask"] = torch.tensor([[True, False]])
+    target["extrinsics"][0, 1] = float("nan")
+    result = compute_camera_loss(prediction, target)
+    torch.testing.assert_close(result["loss_T"], torch.tensor(2 / 3))
+    result["loss_camera"].backward()
+    assert prediction["pose_enc_list"][0].grad[0, 0, 0] != 0
+    assert prediction["pose_enc_list"][0].grad[0, 1, 0] == 0
+    target["camera_valid_mask"] = torch.tensor([[True, True]])
+    with pytest.raises(ValueError, match="finite"):
+        compute_camera_loss(prediction, target)
+    target["extrinsics"][0, 1] = target["extrinsics"][0, 0]
+    target["intrinsics"][0, 1, 0, 0] = 0
+    with pytest.raises(ValueError, match="focal"):
+        compute_camera_loss(prediction, target)
+
+
+@pytest.mark.parametrize("mask", [
+    torch.ones(2, dtype=torch.bool),
+    torch.ones(1, 3, dtype=torch.bool),
+    torch.ones(1, 2, dtype=torch.float32),
+])
+def test_camera_loss_rejects_misaligned_mask(mask: Tensor) -> None:
+    """An explicit camera mask must match batch and frame axes exactly."""
+    prediction, target = _camera_fixture()
+    target["camera_valid_mask"] = mask
+    with pytest.raises(ValueError, match="camera_valid_mask"):
+        compute_camera_loss(prediction, target)
+
+
+def test_camera_loss_rejects_zero_camera_eligibility_before_aggregation() -> None:
+    """An empty camera segment raises instead of becoming an objective term."""
+    prediction, target = _camera_fixture()
+    target["camera_valid_mask"] = torch.zeros(1, 2, dtype=torch.bool)
+    with pytest.raises(ValueError, match="no valid camera"):
+        compute_camera_loss(prediction, target)
+
+def test_zero_camera_labels_abort_before_sequence_aggregation() -> None:
+    """A segment without camera labels cannot contribute a zero-valued mean term."""
+    prediction, target = _camera_fixture()
+    targets = [dict(target) for _ in range(3)]
+    targets[1]["camera_valid_mask"] = torch.zeros(1, 2, dtype=torch.bool)
+    calls = []
+
+    def camera_only(predicted, segment):
+        """Record segment evaluation and return the production camera objective."""
+        calls.append(segment)
+        return MultitaskLoss(camera={"weight": 5.0, "loss_type": "l1"})(predicted, segment)
+
+    with pytest.raises(ValueError, match="no valid camera labels"):
+        compute_recurrent_losses(
+            _sequence([prediction] * 3), targets, camera_only,
+        )
+    assert calls == targets[:2]

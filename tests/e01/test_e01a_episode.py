@@ -45,6 +45,7 @@ def _make_episode() -> dict[str, object]:
         "cam_points": cam_points,
         "world_points": world_points,
         "point_masks": torch.ones(1, frames, 2, 2, dtype=torch.bool),
+        "camera_valid_mask": torch.ones(1, frames, dtype=torch.bool),
         "original_sizes": torch.tensor([2, 2]).view(1, 1, 2).expand(1, frames, 2).clone(),
     }
 
@@ -57,8 +58,8 @@ def test_streaming_config_composes_with_fixed_values():
     assert cfg.img_size == 518
     assert dict(cfg.e01a) == {
         "experiment_id": "E01a",
-        "total_frames": 9,
-        "segment_frames": 3,
+        "total_frames": 15,
+        "segment_frames": 5,
         "num_segments": 3,
         "backprop_mode": "full",
         "memory_enabled": True,
@@ -184,7 +185,7 @@ def test_future_and_mutation_isolation():
 
 
 
-def test_active_config_splits_nine_frames_into_three_segments() -> None:
+def test_active_config_splits_fifteen_frames_into_three_segments() -> None:
     """The same splitter accepts the configured shorter episode geometry."""
     cfg = load_config("e01a_frozen_aggregator_streaming")
     raw = _make_episode()
@@ -195,5 +196,58 @@ def test_active_config_splits_nine_frames_into_three_segments() -> None:
         segment_frames=cfg.sequence.segment_frames,
     )
     assert [segment["ids"][0].tolist() for segment in segments] == [
-        [0, 1, 2], [3, 4, 5], [6, 7, 8]
+        [0, 1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 11, 12, 13, 14]
     ]
+
+def test_camera_mask_splits_with_ids_and_zero_points_reject_normalization():
+    """Validity follows frame IDs; point-derived scale needs an eligible point."""
+    raw = _make_episode()
+    raw["camera_valid_mask"] = torch.ones(1, 24, dtype=torch.bool)
+    raw["camera_valid_mask"][0, 3] = False
+    segments = split_episode(raw, total_frames=24, segment_frames=8)
+    assert segments[0]["camera_valid_mask"][0, 3].item() is False
+    assert segments[1]["camera_valid_mask"].all()
+    raw["camera_valid_mask"] = torch.ones(1, 23, dtype=torch.bool)
+    with pytest.raises(ValueError, match="frames|camera_valid_mask"):
+        split_episode(raw, total_frames=24, segment_frames=8)
+    raw = _make_episode()
+    raw["point_masks"][:, :8] = False
+    with pytest.raises(ValueError, match="no valid points"):
+        normalize_segment(split_episode(raw, total_frames=24, segment_frames=8)[0])
+
+@pytest.mark.parametrize("field", ["extrinsics", "intrinsics"])
+def test_preparation_rejects_nonfinite_marked_camera_and_keeps_masked_frames(field: str):
+    """Raw marked targets fail before normalization can repair their values."""
+    from training.recurrent_trainer import iter_prepared_segments
+    from loss import compute_camera_loss
+
+    raw = _make_episode()
+    raw[field][0, 9, 0, 0] = float("nan")
+    with pytest.raises(ValueError, match="valid raw camera targets must be finite"):
+        list(iter_prepared_segments(
+            raw, device=torch.device("cpu"), total_frames=24, segment_frames=8,
+        ))
+
+    raw["camera_valid_mask"][0, 9] = False
+    prepared = list(iter_prepared_segments(
+        raw, device=torch.device("cpu"), total_frames=24, segment_frames=8,
+    ))
+    assert len(prepared) == 3
+    assert prepared[1]["ids"][0, 1].item() == 9
+    assert prepared[1]["camera_valid_mask"][0, 1].item() is False
+    camera = compute_camera_loss(
+        {"pose_enc_list": [torch.zeros(1, 8, 9)]}, prepared[1],
+    )
+    assert torch.isfinite(camera["loss_camera"])
+
+
+def test_preparation_rejects_nonpositive_marked_focal_length():
+    """A finite but invalid raw focal label fails at the preparation boundary."""
+    from training.recurrent_trainer import iter_prepared_segments
+
+    raw = _make_episode()
+    raw["intrinsics"][0, 9, 0, 0] = 0
+    with pytest.raises(ValueError, match="raw camera focal lengths"):
+        list(iter_prepared_segments(
+            raw, device=torch.device("cpu"), total_frames=24, segment_frames=8,
+        ))

@@ -99,6 +99,7 @@ class UpdateDiagnostic:
         memory_shape: tuple[int, ...] = (1, 16, 512),
         expected_rates: dict[str, float] | None = None,
         expected_decay: float | None = None,
+        precision: str = "unspecified",
     ) -> None:
         """Create an observer with expected segment image and memory shapes.
 
@@ -114,6 +115,7 @@ class UpdateDiagnostic:
         self.memory_shape = memory_shape
         self.expected_rates = expected_rates
         self.expected_decay = expected_decay
+        self.precision = precision
         self._before: dict[str, str] = {}
         self._steps = 0
         self._current: dict[str, Any] = {}
@@ -227,6 +229,9 @@ class UpdateDiagnostic:
         self._backward_calls = 0
         self._current = {
             "frame_ids": ids[0].tolist(),
+            "precision": self.precision,
+            "depth_gate_value": float(torch.sigmoid(model.depth_read_adaptor.residual_gate.detach()).cpu())
+            if hasattr(model.depth_read_adaptor, "residual_gate") else None,
             "identity": segments[0].get("seq_name"),
             "segment_indices": list(range(self.num_segments)),
             "image_shapes": [list(s["images"].shape) for s in segments],
@@ -251,9 +256,17 @@ class UpdateDiagnostic:
         """Count the single full-sequence backward operation before unscaling."""
         self._backward_calls += 1
 
-    def after_unscale(self, model: Any) -> None:
-        """Count finite, nonzero, zero, and missing gradients before global clipping."""
+    def after_unscale(self, model: Any, scaler: Any | None = None) -> None:
+        """Store detached unscaled gradients, including nonfinite overflow evidence."""
+        if scaler is not None:
+            self._current["scaler_scale"] = float(scaler.get_scale())
+            if hasattr(scaler, "is_enabled"):
+                self._current["scaler_enabled"] = bool(scaler.is_enabled())
         report: dict[str, Any] = {}
+        depth_tensors: dict[str, Any] = {}
+        depth_groups: dict[str, dict[str, Any]] = {}
+        nonfinite_gradients: dict[str, dict[str, int]] = {}
+        disconnected: list[str] = []
         for component in _COMPONENTS:
             named = [
                 (name, p)
@@ -262,35 +275,64 @@ class UpdateDiagnostic:
             ]
             present, nonzero, missing, zero, nonzero_names = 0, 0, [], [], []
             norm_sq = 0.0
+            nonfinite_names = []
             for name, parameter in named:
                 gradient = parameter.grad
                 if gradient is None:
                     missing.append(name)
                     continue
-                if not torch.isfinite(gradient).all():
-                    raise ValueError(f"nonfinite gradient: {name}")
                 present += 1
-                squared = float(gradient.detach().float().square().sum().cpu())
-                if not math.isfinite(squared):
-                    raise ValueError(f"nonfinite gradient norm: {name}")
-                norm_sq += squared
-                if squared > 0:
+                values = gradient.detach()
+                counts = {
+                    "nan_elements": int(torch.count_nonzero(torch.isnan(values)).cpu()),
+                    "positive_inf_elements": int(torch.count_nonzero(torch.isposinf(values)).cpu()),
+                    "negative_inf_elements": int(torch.count_nonzero(torch.isneginf(values)).cpu()),
+                }
+                finite = not any(counts.values())
+                if not finite:
+                    nonfinite_gradients[name] = counts
+                    nonfinite_names.append(name)
+                squared = float(values.double().square().sum().cpu()) if finite else None
+                if squared is not None:
+                    norm_sq += squared
+                if component == "depth_read_adaptor":
+                    zero_elements = int(torch.count_nonzero(values == 0).cpu())
+                    group = (
+                        name.split(".")[1] if not name.startswith("depth_read_adaptor.blocks.")
+                        else ".".join(name.split(".")[1:3])
+                    )
+                    depth_tensors[name] = {
+                        "group": group,
+                        "norm": math.sqrt(squared) if squared is not None else None,
+                        "zero_elements": zero_elements,
+                        "elements": values.numel(),
+                    }
+                    summary = depth_groups.setdefault(
+                        group, {"tensors": 0, "zero_tensors": 0, "nonfinite_tensors": 0, "zero_elements": 0, "elements": 0}
+                    )
+                    summary["tensors"] += 1
+                    summary["zero_tensors"] += squared == 0
+                    summary["nonfinite_tensors"] += not finite
+                    summary["zero_elements"] += zero_elements
+                    summary["elements"] += values.numel()
+                if squared is not None and squared > 0:
                     nonzero += 1
                     nonzero_names.append(name)
-                else:
+                elif squared == 0:
                     zero.append(name)
             if not named or not nonzero or missing:
-                raise ValueError(
-                    f"disconnected component: {component}; missing={missing}"
-                )
+                disconnected.append(f"{component}; missing={missing}")
             report[component] = {
                 "present": present,
                 "nonzero": nonzero,
                 "nonzero_names": nonzero_names,
+                "nonfinite": nonfinite_names,
                 "missing": missing,
                 "zero": zero,
-                "norm": math.sqrt(norm_sq),
+                "norm": None if nonfinite_names else math.sqrt(norm_sq),
             }
+        if disconnected and not nonfinite_gradients:
+            raise ValueError(f"disconnected component: {', '.join(disconnected)}")
         if any(p.grad is not None for p in model.aggregator.parameters()):
             raise ValueError("frozen aggregator has gradients")
         for suffix in ("initial_memory_bank", "keep_gate"):
@@ -302,16 +344,27 @@ class UpdateDiagnostic:
             if selected and any(parameter.grad is None for _, parameter in selected):
                 raise ValueError(f"memory reachability is missing {suffix}")
         self._current["gradients"] = report
+        self._current["nonfinite_gradients"] = nonfinite_gradients
+        self._current["depth_gradient_tensors"] = depth_tensors
+        self._current["depth_gradient_groups"] = depth_groups
+        if nonfinite_gradients and self._current.get("scaler_enabled") is False:
+            raise ValueError("nonfinite unscaled gradients with disabled GradScaler")
 
     def after_clip(self, norm: Any) -> None:
-        """Record exactly one finite pre-clipping global norm for this update."""
+        """Record the pre-clipping norm, including an overflow before a scaler skip."""
         self._clip_calls += 1
         value = (
             float(norm.detach().float().cpu()) if torch.is_tensor(norm) else float(norm)
         )
         if not math.isfinite(value):
-            raise ValueError("global pre-clipping gradient norm is nonfinite")
-        self._current["preclip_global_norm"] = value
+            self._current["preclip_global_norm"] = None
+            self._current["preclip_global_norm_nonfinite"] = str(value)
+            if self._current.get("scaler_enabled") is False:
+                raise ValueError("nonfinite gradient clip norm with disabled GradScaler")
+            if not self._current.get("nonfinite_gradients"):
+                raise ValueError("nonfinite gradient clip norm with finite unscaled gradients")
+        else:
+            self._current["preclip_global_norm"] = value
 
     def after_schedule(self, optimizer: Any, progress: float) -> None:
         """Check scheduled group rates after one progress advancement."""
@@ -343,10 +396,10 @@ class UpdateDiagnostic:
             handle.remove()
 
     def after_update(self, model: Any, optimizer: Any, scaler: Any) -> None:
-        """Require one real step and supervised changes in every component."""
-        if self._steps != 1:
+        """Record a real step or scaler skip and distinguish gradient-driven movement."""
+        if self._steps not in (0, 1):
             raise ValueError(
-                f"expected one underlying optimizer step, got {self._steps}"
+                f"expected at most one underlying optimizer step, got {self._steps}"
             )
         if self._current and (
             self._backward_calls,
@@ -364,24 +417,44 @@ class UpdateDiagnostic:
             for component in _COMPONENTS:
                 if name.startswith(component + ".") and altered:
                     changed[component].append(name)
-        if any(not names for names in changed.values()):
-            raise ValueError(f"component parameters did not change: {changed}")
-        if "gradients" in self._current:
-            for component, names in changed.items():
-                if not set(names).intersection(
-                    self._current["gradients"][component]["nonzero_names"]
-                ):
-                    raise ValueError(
-                        f"component changed only without a nonzero supervised gradient: {component}"
-                    )
+        if self._steps == 0:
+            if any(changed.values()):
+                raise ValueError(f"parameters changed despite skipped optimizer step: {changed}")
+        else:
+            if self._current.get("nonfinite_gradients"):
+                raise ValueError("optimizer stepped with nonfinite unscaled gradients")
+            if any(not names for names in changed.values()):
+                raise ValueError(f"component parameters did not change: {changed}")
+            if "gradients" in self._current:
+                for component, names in changed.items():
+                    if not set(names).intersection(
+                        self._current["gradients"][component]["nonzero_names"]
+                    ):
+                        raise ValueError(
+                            f"component changed only without a nonzero supervised gradient: {component}"
+                        )
+        groups_after = validate_groups(model, optimizer)
+        if self._steps == 0 and "groups_before" in self._current:
+            if any(
+                groups_after[name]["learning_rate"] != before["learning_rate"]
+                for name, before in self._current["groups_before"].items()
+            ):
+                raise ValueError("learning rates changed despite skipped optimizer step")
         self._current.update(
             {
                 "changed_parameters": changed,
+                "depth_changed_with_zero_current_gradient": [
+                    name for name in changed["depth_read_adaptor"]
+                    if self._current["depth_gradient_tensors"].get(name, {}).get("norm") == 0
+                ],
                 "backward_calls": self._backward_calls,
                 "clipping_calls": self._clip_calls,
                 "scheduler_advancements": self._schedule_calls,
                 "actual_optimizer_steps": self._steps,
-                "groups_after": validate_groups(model, optimizer),
+                "optimizer_ran": self._steps == 1,
+                "optimizer_outcome": "stepped" if self._steps == 1 else "skipped",
+                "groups_after": groups_after,
+                "scaler_scale_after": float(scaler.get_scale()),
                 "scaler_state_empty": not bool(scaler.state_dict()),
             }
         )

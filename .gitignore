@@ -149,5 +149,4 @@ skyseg.onnx
 *.egg-info
 
 .agents
-/datasets/
-/vggt_weights
+/data/

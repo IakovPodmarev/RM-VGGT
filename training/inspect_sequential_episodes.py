@@ -102,7 +102,7 @@ def inspect_sequential_episodes(
                 raise ValueError(f"{phase} batch identity changed between segments")
             if any(
                 segment[field].shape[1] != segment_frames
-                for field in FRAME_INDEXED_FIELDS
+                for field in FRAME_INDEXED_FIELDS if field in segment
             ):
                 raise ValueError(f"{phase} segment has an unsliced frame field")
             expected = normalize_segment(segment)

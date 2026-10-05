@@ -27,6 +27,9 @@ from training.smoke_recurrent_training import (
     verify_restoration,
 )
 from training.recurrent_trainer import RecurrentTrainer
+from training.recurrent_step import run_recurrent_train_step
+from test_e01a_recurrent_step import _Model, _conf, _specs
+from training.train_utils.optimizer import construct_optimizer_for_component_groups
 from test_e01a_recurrent_trainer import (
     RecordingLogger,
     TinyModel,
@@ -129,9 +132,9 @@ def test_config_is_bounded_and_base_file_unchanged(tmp_path: Path) -> None:
         first.sequence.total_frames,
         first.sequence.segment_frames,
         first.sequence.num_segments,
-    ) == (9, 3, 3)
-    assert first.model.segment_frames == 3
-    assert first.episode_sources.train.total_frames == 9
+    ) == (15, 5, 3)
+    assert first.model.segment_frames == 5
+    assert first.episode_sources.train.total_frames == 15
     assert (
         first.checkpoint.pretrained_checkpoint_path
         and not second.checkpoint.pretrained_checkpoint_path
@@ -295,8 +298,8 @@ def test_group_membership_and_gradient_audit() -> None:
     with pytest.raises(ValueError, match="disconnected"):
         audit.after_unscale(model)
     model.camera_head.bias.grad = torch.full_like(model.camera_head.bias, float("nan"))
-    with pytest.raises(ValueError, match="nonfinite"):
-        audit.after_unscale(model)
+    audit.after_unscale(model)
+    assert audit._current["nonfinite_gradients"]["camera_head.bias"]["nan_elements"] == 1
     wrapper.optimizer.param_groups[0]["params"].append(model.camera_head.weight)
     with pytest.raises(ValueError, match="duplicate|misplaced"):
         validate_groups(model, wrapper)
@@ -361,17 +364,199 @@ def test_wrong_scheduled_rate_is_rejected() -> None:
 
 
 def test_skipped_step_and_unchanged_values_fail() -> None:
-    """An AMP skip or unchanged component cannot be reported as an update."""
+    """A skipped attempt is recorded; a purported real step still needs movement."""
     model = SmallModel()
     wrapper = GroupWrapper(model)
     audit = UpdateDiagnostic(image_shape=(1, 3, 3, 4, 4), num_segments=3)
     audit._before = {name: tensor_digest(p) for name, p in model.named_parameters()}
-    with pytest.raises(ValueError, match="underlying optimizer step"):
-        audit.after_update(model, wrapper, torch.amp.GradScaler("cpu", enabled=False))
+    audit.after_update(model, wrapper, torch.amp.GradScaler("cpu", enabled=False))
+    assert audit.records[0]["actual_optimizer_steps"] == 0
+    assert audit.records[0]["optimizer_outcome"] == "skipped"
+    audit._before = {name: tensor_digest(p) for name, p in model.named_parameters()}
     with audit.observe_step(wrapper.optimizer):
         wrapper.optimizer.step()
     with pytest.raises(ValueError, match="did not change"):
         audit.after_update(model, wrapper, torch.amp.GradScaler("cpu", enabled=False))
+    assert not wrapper.optimizer._optimizer_step_post_hooks
+
+
+def test_diagnostic_records_nonfinite_gradient_and_real_scaler_skip() -> None:
+    """The full diagnostic path lets GradScaler skip AdamW and records the outcome."""
+    model = _Model()
+    model.aggregator.eval()
+    wrapper = construct_optimizer_for_component_groups(model, _conf(), _specs(model))
+    scaler = torch.amp.GradScaler("cpu", init_scale=8.0)
+    audit = UpdateDiagnostic(
+        image_shape=(1, 3, 3, 2, 2),
+        num_segments=3,
+        memory_shape=(1, 1, 1),
+        precision="float16",
+    )
+    segments = [
+        {
+            "images": torch.full((1, 3, 3, 2, 2), float(index + 1)),
+            "ids": torch.arange(index * 3, index * 3 + 3).reshape(1, 3),
+            "segment_index": index,
+            "frame_start": index * 3,
+            "frame_stop": (index + 1) * 3,
+            "seq_name": ["scene/variation/camera/0"],
+        }
+        for index in range(3)
+    ]
+    def loss_fn(prediction, _segment):
+        camera = prediction["camera"].square().mean()
+        depth = prediction["depth"].square().mean()
+        return {"objective": camera + depth, "loss_camera": camera, "loss_depth": depth}
+
+    before = {name: tensor_digest(parameter) for name, parameter in model.named_parameters()}
+    rates = [group["lr"] for group in wrapper.optimizer.param_groups]
+    hook = model.depth_head.weight.register_hook(
+        lambda gradient: torch.full_like(gradient, float("inf"))
+    )
+    try:
+        result = run_recurrent_train_step(
+            model=model,
+            segments=segments,
+            loss_fn=loss_fn,
+            optimizer=wrapper,
+            scaler=scaler,
+            gradient_clipper=lambda module: torch.nn.utils.clip_grad_norm_(
+                [parameter for parameter in module.parameters() if parameter.requires_grad], 1.0
+            ),
+            autocast_enabled=False,
+            autocast_dtype=torch.float16,
+            autocast_device_type="cpu",
+            scheduler_progress=1 / 20,
+            num_segments=3,
+            segment_frames=3,
+            diagnostic=audit,
+        )
+    finally:
+        hook.remove()
+    assert result.optimizer_ran is False
+    assert scaler.get_scale() == 4.0
+    assert not wrapper.optimizer.state
+    assert [group["lr"] for group in wrapper.optimizer.param_groups] == rates
+    assert all(
+        tensor_digest(parameter) == before[name]
+        for name, parameter in model.named_parameters()
+    )
+    record = audit.records[0]
+    assert record["nonfinite_gradients"]["depth_head.weight"]["positive_inf_elements"] == 1
+    assert record["gradients"]["depth_head"]["nonfinite"] == ["depth_head.weight"]
+    assert record["preclip_global_norm"] is None
+    assert record["preclip_global_norm_nonfinite"] == "inf"
+    assert record["scaler_scale"] == 8.0
+    assert record["scaler_scale_after"] == 4.0
+    assert record["optimizer_outcome"] == "skipped"
+    assert record["optimizer_ran"] is False
+    assert record["actual_optimizer_steps"] == 0
+    assert record["backward_calls"] == record["clipping_calls"] == record["scheduler_advancements"] == 1
+    assert not any(record["changed_parameters"].values())
+    assert not wrapper.optimizer._optimizer_step_post_hooks
+    json.dumps(record)
+
+
+@pytest.mark.parametrize(
+    ("scaler_enabled", "overflow_at"),
+    [(False, "gradient"), (False, "clip_norm"), (True, "clip_norm")],
+)
+def test_nonfinite_diagnostic_rejects_before_adamw(
+    scaler_enabled: bool, overflow_at: str
+) -> None:
+    """A rejected clip norm or disabled-scaler gradient leaves AdamW unchanged."""
+    torch.manual_seed(17)
+    model = _Model()
+    model.aggregator.eval()
+    wrapper = construct_optimizer_for_component_groups(model, _conf(), _specs(model))
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            parameter.grad = torch.ones_like(parameter)
+    wrapper.optimizer.step()
+    wrapper.zero_grad(set_to_none=True)
+    before = {name: tensor_digest(parameter) for name, parameter in model.named_parameters()}
+    state_before = {
+        parameter: {key: value.detach().clone() for key, value in state.items()}
+        for parameter, state in wrapper.optimizer.state.items()
+    }
+    rates = [group["lr"] for group in wrapper.optimizer.param_groups]
+    scaler = torch.amp.GradScaler("cpu", enabled=scaler_enabled, init_scale=8.0)
+    audit = UpdateDiagnostic(
+        image_shape=(1, 3, 3, 2, 2),
+        num_segments=3,
+        memory_shape=(1, 1, 1),
+    )
+    segments = [
+        {
+            "images": torch.full((1, 3, 3, 2, 2), float(index + 1)),
+            "ids": torch.arange(index * 3, index * 3 + 3).reshape(1, 3),
+            "segment_index": index,
+            "frame_start": index * 3,
+            "frame_stop": (index + 1) * 3,
+            "seq_name": ["scene/variation/camera/0"],
+        }
+        for index in range(3)
+    ]
+
+    def loss_fn(prediction, _segment):
+        camera = prediction["camera"].square().mean()
+        depth = prediction["depth"].square().mean()
+        return {"objective": camera + depth, "loss_camera": camera, "loss_depth": depth}
+
+    clip_calls = []
+
+    def clipper(_model):
+        clip_calls.append(True)
+        return torch.tensor(float("inf"))
+
+    hook = (
+        model.depth_head.weight.register_hook(
+            lambda gradient: torch.full_like(gradient, float("inf"))
+        )
+        if overflow_at == "gradient"
+        else None
+    )
+    try:
+        message = "finite unscaled gradients" if scaler_enabled else "disabled GradScaler"
+        with pytest.raises(ValueError, match=message):
+            run_recurrent_train_step(
+                model=model,
+                segments=segments,
+                loss_fn=loss_fn,
+                optimizer=wrapper,
+                scaler=scaler,
+                gradient_clipper=clipper,
+                autocast_enabled=False,
+                autocast_dtype=torch.float16,
+                autocast_device_type="cpu",
+                scheduler_progress=1 / 20,
+                num_segments=3,
+                segment_frames=3,
+                diagnostic=audit,
+            )
+    finally:
+        if hook is not None:
+            hook.remove()
+    assert clip_calls == ([] if overflow_at == "gradient" else [True])
+    assert audit._current["scaler_enabled"] is scaler_enabled
+    assert scaler.get_scale() == (8.0 if scaler_enabled else 1.0)
+    assert "scheduled_rates" not in audit._current
+    if overflow_at == "gradient":
+        assert audit._current["nonfinite_gradients"]["depth_head.weight"]["positive_inf_elements"] == 1
+    else:
+        assert audit._current["preclip_global_norm_nonfinite"] == "inf"
+        if scaler_enabled:
+            assert audit._current["nonfinite_gradients"] == {}
+    assert audit.records == []
+    assert [group["lr"] for group in wrapper.optimizer.param_groups] == rates
+    assert all(
+        tensor_digest(parameter) == before[name]
+        for name, parameter in model.named_parameters()
+    )
+    assert wrapper.optimizer.state.keys() == state_before.keys()
+    for parameter, state in wrapper.optimizer.state.items():
+        assert state.keys() == state_before[parameter].keys()
+        assert all(torch.equal(value, state_before[parameter][key]) for key, value in state.items())
     assert not wrapper.optimizer._optimizer_step_post_hooks
 
 
@@ -573,3 +758,53 @@ def test_bfloat16_profile_keeps_the_default_initial_scale(tmp_path: Path) -> Non
     )
     assert cfg.optim.amp.amp_dtype == "bfloat16"
     assert cfg.optim.amp.init_scale == 65536.0
+
+def test_depth_gradient_detail_separates_current_signal_from_adamw_movement() -> None:
+    """Unscaled tensor norms and zero counts identify momentum-driven changes."""
+    class DepthModule(nn.Module):
+        """Expose projection, block, and gate names used by the real adaptor."""
+
+        def __init__(self):
+            """Construct small parameters with the real grouping layout."""
+            super().__init__()
+            self.input_projection = nn.Linear(1, 1)
+            self.blocks = nn.ModuleList([nn.Linear(1, 1) for _ in range(3)])
+            self.output_projection = nn.Linear(1, 1)
+            self.residual_gate = nn.Parameter(torch.tensor(-2.1972246))
+
+    model = SmallModel()
+    model.depth_read_adaptor = DepthModule()
+    wrapper = GroupWrapper(model)
+    audit = UpdateDiagnostic(image_shape=(1, 3, 3, 4, 4), num_segments=3, precision="float16")
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            parameter.grad = torch.ones_like(parameter)
+    audit.after_unscale(model, SimpleNamespace(get_scale=lambda: 128.0))
+    detail = audit._current["depth_gradient_tensors"]
+    groups = audit._current["depth_gradient_groups"]
+    assert set(groups) == {"input_projection", "output_projection", "blocks.0", "blocks.1", "blocks.2", "residual_gate"}
+    assert detail["depth_read_adaptor.input_projection.weight"]["norm"] == 1.0
+    assert detail["depth_read_adaptor.input_projection.weight"]["zero_elements"] == 0
+    assert audit._current["scaler_scale"] == 128.0
+    wrapper.optimizer.step()
+
+    before = {name: tensor_digest(parameter) for name, parameter in model.named_parameters()}
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            parameter.grad = (
+                torch.zeros_like(parameter)
+                if name.startswith("depth_read_adaptor.") and name != "depth_read_adaptor.residual_gate"
+                else torch.ones_like(parameter)
+            )
+    audit.after_unscale(model, SimpleNamespace(get_scale=lambda: 64.0))
+    assert groups["blocks.0"]["zero_tensors"] == 0
+    assert audit._current["depth_gradient_groups"]["blocks.0"]["zero_tensors"] == 2
+    with audit.observe_step(wrapper.optimizer):
+        wrapper.optimizer.step()
+    moved_without_gradient = [
+        name for name, parameter in model.named_parameters()
+        if name.startswith("depth_read_adaptor.") and tensor_digest(parameter) != before[name]
+        and detail[name]["norm"] > 0
+        and audit._current["depth_gradient_tensors"][name]["norm"] == 0
+    ]
+    assert moved_without_gradient

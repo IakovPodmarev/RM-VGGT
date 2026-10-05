@@ -303,3 +303,82 @@ def test_e01a_documented_source_target_imports_without_launching_training() -> N
     assert callable(train) and callable(validation)
     with pytest.raises(ValueError, match="dataset root"):
         train(0)
+
+
+def test_e01a_skipped_scaler_attempt_reuses_schedule_and_survives_resume(tmp_path: Path) -> None:
+    """A skipped AdamW call leaves state and rates intact; the next attempt uses that slot."""
+    from copy import deepcopy
+
+    logger = RecordingLogger()
+    runner = RecurrentTrainer(
+        config(tmp_path, train_limit=2), train_episodes=source(2),
+        validation_episodes=source(1), model=TinyModel(), loss_fn=loss_fn,
+        logger=logger,
+    )
+    underlying = runner.optimizer.optimizer
+    original_step = runner.scaler.step
+    original_schedule = runner.optimizer.step_schedulers
+    attempted_progress = []
+    attempted_rates = []
+    before_weights = deepcopy(runner.model.state_dict())
+    before_state = deepcopy(underlying.state_dict())
+    before_rates = [group["lr"] for group in underlying.param_groups]
+
+    def schedule(progress):
+        """Verify a skipped attempt restored state before requesting the same slot."""
+        if attempted_progress:
+            assert runner.completed_updates == 0 and runner.skipped_attempts == 1
+            assert [group["lr"] for group in underlying.param_groups] == before_rates
+            assert all(torch.equal(value, before_weights[name]) for name, value in runner.model.state_dict().items())
+            assert _state_equal_for_skip(underlying.state_dict(), before_state)
+        attempted_progress.append(progress)
+        return original_schedule(progress)
+
+    def skip_then_step(optimizer):
+        """Simulate one GradScaler overflow, then delegate the next real step."""
+        attempted_rates.append([group["lr"] for group in optimizer.param_groups])
+        if len(attempted_rates) == 1:
+            assert runner.completed_updates == 0
+            assert all(torch.equal(value, before_weights[name]) for name, value in runner.model.state_dict().items())
+            assert _state_equal_for_skip(optimizer.state_dict(), before_state)
+            return None
+        assert [group["lr"] for group in optimizer.param_groups] != before_rates
+        return original_step(optimizer)
+
+    runner.optimizer.step_schedulers = schedule
+    runner.scaler.step = skip_then_step
+    runner.train_epoch(0)
+    assert attempted_progress == [attempted_progress[0]] * 2
+    assert attempted_rates[0] == attempted_rates[1]
+    assert runner.completed_updates == 1 and runner.skipped_attempts == 1
+    assert any("train/optimizer_ran" in event and event["train/optimizer_ran"] is False for event in logger.events)
+    assert any("train/optimizer_ran" in event and event["train/optimizer_ran"] is True for event in logger.events)
+    assert len(underlying.state) > 0
+    runner.save_checkpoint(0, 1.0)
+    saved = torch.load(tmp_path / "epoch_0000.pt", map_location="cpu", weights_only=False)
+    assert saved["completed_updates"] == 1 and saved["skipped_attempts"] == 1
+    assert saved["scheduler_progress"] == 1 / runner.scheduled_updates
+
+    resumed = RecurrentTrainer(
+        config(tmp_path / "resumed", train_limit=2), train_episodes=source(1),
+        validation_episodes=source(1), model=TinyModel(), loss_fn=loss_fn,
+        logger=RecordingLogger(),
+    )
+    resumed.resume_from_checkpoint(tmp_path / "epoch_0000.pt")
+    assert resumed.completed_updates == 1 and resumed.skipped_attempts == 1
+    assert [group["lr"] for group in resumed.optimizer.optimizer.param_groups] == [
+        group["lr"] for group in underlying.param_groups
+    ]
+
+
+def _state_equal_for_skip(first: dict, second: dict) -> bool:
+    """Compare optimizer state recursively before any actual AdamW update."""
+    from copy import deepcopy
+    if first["state"] != second["state"]:
+        return False
+    left, right = deepcopy(first), deepcopy(second)
+    for group in left["param_groups"]:
+        group.pop("lr", None)
+    for group in right["param_groups"]:
+        group.pop("lr", None)
+    return left == right

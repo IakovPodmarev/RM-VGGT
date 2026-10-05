@@ -18,6 +18,7 @@ FRAME_INDEXED_FIELDS = (
     "cam_points",
     "world_points",
     "point_masks",
+    "camera_valid_mask",
     "original_sizes",
 )
 """Fields whose dimension 1 is the explicit batched frame axis."""
@@ -30,7 +31,7 @@ _REQUIRED_NORMALIZATION_FIELDS = (
     "point_masks",
 )
 _SEGMENT_METADATA_FIELDS = ("segment_index", "frame_start", "frame_stop")
-_OPTIONAL_FRAME_FIELDS = ("original_sizes",)
+_OPTIONAL_FRAME_FIELDS = ("original_sizes", "camera_valid_mask")
 
 
 def validate_segment_dimensions(
@@ -154,8 +155,10 @@ def normalize_segment(raw_segment_batch: Mapping[str, Any]) -> dict[str, Any]:
     Raises:
         TypeError: If the segment is not a mapping or required fields are not
             tensors.
-        ValueError: If fields are missing, have inconsistent or empty frame
-            dimensions, or any contained tensor is not on CPU.
+        ValueError: If fields are missing, misaligned, empty, or off CPU;
+            if marked-valid raw camera targets are nonfinite or have invalid
+            focal lengths; if a batch element has no valid points for scale;
+            or if an explicit mask marks the reference camera invalid.
 
     Invariants:
         ``normalize_camera_extrinsics_and_points_batch`` is the sole geometry
@@ -179,6 +182,25 @@ def normalize_segment(raw_segment_batch: Mapping[str, Any]) -> dict[str, Any]:
             f"raw_segment_batch is missing normalization fields: {missing}"
         )
 
+    intrinsics = raw_segment_batch["intrinsics"]
+    if extrinsics.shape[-2:] != (3, 4) or intrinsics.shape != (*extrinsics.shape[:2], 3, 3):
+        raise ValueError("raw camera targets must have aligned [B, frames, 3, 4/3] shapes")
+    camera_mask = raw_segment_batch.get("camera_valid_mask")
+    if camera_mask is None:
+        camera_mask = torch.ones(extrinsics.shape[:2], dtype=torch.bool)
+    elif not camera_mask[:, 0].all():
+        raise ValueError("segment first camera must be valid for normalization")
+    valid_extrinsics = extrinsics[camera_mask]
+    valid_intrinsics = intrinsics[camera_mask]
+    if not torch.isfinite(valid_extrinsics).all() or not torch.isfinite(valid_intrinsics).all():
+        raise ValueError("valid raw camera targets must be finite before normalization")
+    if (valid_intrinsics[:, 0, 0] <= 0).any() or (valid_intrinsics[:, 1, 1] <= 0).any():
+        raise ValueError("valid raw camera focal lengths must be positive")
+    point_masks = raw_segment_batch["point_masks"]
+    if not torch.is_tensor(point_masks) or point_masks.dtype != torch.bool:
+        raise ValueError("point_masks must be boolean for segment scale")
+    if not point_masks.flatten(2).any(dim=-1).any(dim=1).all():
+        raise ValueError("segment has no valid points for normalization")
     normalized = {key: _copy_value(value) for key, value in raw_segment_batch.items()}
     extrinsics, cam_points, world_points, depths = (
         normalize_camera_extrinsics_and_points_batch(
@@ -218,6 +240,12 @@ def _validate_episode_fields(episode: Mapping[str, Any], frame_count: int) -> No
             raise ValueError(
                 f"episode field {key!r} has {value.shape[1]} frames, expected {frame_count}"
             )
+    camera_mask = episode.get("camera_valid_mask")
+    if camera_mask is not None and (
+        camera_mask.shape != episode["extrinsics"].shape[:2]
+        or camera_mask.dtype != torch.bool
+    ):
+        raise ValueError("camera_valid_mask must be a frame-aligned boolean [B, frames] tensor")
     _validate_cpu_residency(episode)
 
 

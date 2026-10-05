@@ -50,6 +50,21 @@ Strong preference:
 - avoid changing dense-head patch-grid assumptions unless necessary
 - treat point and track paths as optional/secondary during early RM work
 
+## Dataset adaptor supervision contract
+
+Dataset adaptors must report camera-label validity independently of depth or
+point validity. When camera supervision is enabled, the adaptor must provide a
+frame-aligned camera-valid mask, or explicitly guarantee that every emitted
+frame has a valid camera target. A finite placeholder pose does not establish
+label validity.
+
+Adaptors must validate the shape, frame alignment, and finite values of camera
+targets marked valid. Camera loss must select and average over camera-valid
+frames; it must not infer camera eligibility from depth or point masks. If a
+segment has no valid camera labels, the dataset and training configuration must
+define whether that segment or its whole episode is ineligible before loss
+aggregation. Training, validation, and control runs must apply the same rule.
+
 ## Trainability philosophy
 
 Expected staged progression:

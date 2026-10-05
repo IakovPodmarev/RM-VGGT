@@ -22,6 +22,7 @@ class RecurrentTrainStepResult:
         losses: Segment-local losses and their arithmetic-mean objective.
         gradient_norm: The global norm before clipping when the configured
             clipper exposes it, otherwise ``None``.
+        optimizer_ran: Whether GradScaler invoked the underlying optimizer.
 
     Invariants:
         ``sequence`` and ``losses`` describe the same consumed segment order.
@@ -31,6 +32,7 @@ class RecurrentTrainStepResult:
     sequence: RecurrentSequenceResult
     losses: RecurrentLossResult
     gradient_norm: float | Tensor | None
+    optimizer_ran: bool
 
 
 def run_recurrent_train_step(
@@ -49,7 +51,7 @@ def run_recurrent_train_step(
     segment_frames: int,
     diagnostic: Any | None = None,
 ) -> RecurrentTrainStepResult:
-    """Run one full-BPTT recurrent sequence and exactly one optimizer update.
+    """Run one full-BPTT sequence and attempt one optimizer update.
 
     Args:
         model: Segment model consumed by the recurrent sequence boundary.
@@ -71,19 +73,20 @@ def run_recurrent_train_step(
             retain detached evidence only and release temporary hooks on error.
 
     Returns:
-        The sequence result, segment-local loss result, and pre-clipping global
-        norm when available from the configured clipper.
+        The sequence result, segment-local losses, pre-clipping norm when
+        available, and whether the scaler actually invoked AdamW.
 
     Raises:
         ValueError: If normalized scheduler progress or the sequence objective
             is invalid or nonfinite.
         TypeError: If collaborators do not provide the required callable
             optimizer, scaler, clipping, sequence, or loss capabilities.
+        RuntimeError: If the scaler invokes the optimizer more than once.
 
     Side effects:
         Zeros gradients once, runs one scaled backward call, unscales once,
-        clips the combined trainable set once, updates schedules once, performs
-        one underlying optimizer step, and updates the scaler once.
+        clips the combined trainable set once, attempts the next scheduled rates,
+        restores them on a skipped optimizer step, and updates the scaler once.
 
     Invariants:
         The incoming iterable is not materialized before sequence execution.
@@ -114,7 +117,7 @@ def run_recurrent_train_step(
     underlying = optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer
     scaler.unscale_(underlying)
     if diagnostic is not None:
-        diagnostic.after_unscale(model)
+        diagnostic.after_unscale(model, scaler)
     norm = gradient_clipper(model)
     if isinstance(norm, Mapping):
         if len(norm) != 1:
@@ -122,17 +125,33 @@ def run_recurrent_train_step(
         norm = next(iter(norm.values()))
     if diagnostic is not None:
         diagnostic.after_clip(norm)
+    previous_rates = [group["lr"] for group in underlying.param_groups]
     if hasattr(optimizer, "step_schedulers"):
         optimizer.step_schedulers(scheduler_progress)
     if diagnostic is not None:
         diagnostic.after_schedule(optimizer, scheduler_progress)
-        # A GradScaler may silently skip its underlying step on overflow.
-        # The observer counts actual optimizer calls and checks value changes.
-        with diagnostic.observe_step(underlying):
+    calls = 0
+
+    def record_step(_optimizer: Any, _args: Any, _kwargs: Any) -> None:
+        """Count actual optimizer calls independently of AdamW's return value."""
+        nonlocal calls
+        calls += 1
+
+    handle = underlying.register_step_post_hook(record_step)
+    try:
+        if diagnostic is not None:
+            with diagnostic.observe_step(underlying):
+                scaler.step(underlying)
+        else:
             scaler.step(underlying)
-    else:
-        scaler.step(underlying)
+    finally:
+        handle.remove()
     scaler.update()
+    if calls not in (0, 1):
+        raise RuntimeError(f"expected at most one optimizer call, got {calls}")
+    if calls == 0:
+        for group, rate in zip(underlying.param_groups, previous_rates):
+            group["lr"] = rate
     if diagnostic is not None:
         diagnostic.after_update(model, optimizer, scaler)
-    return RecurrentTrainStepResult(sequence, losses, norm)
+    return RecurrentTrainStepResult(sequence, losses, norm, calls == 1)
