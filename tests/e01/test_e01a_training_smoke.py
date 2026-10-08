@@ -154,6 +154,118 @@ def test_config_is_bounded_and_base_file_unchanged(tmp_path: Path) -> None:
         assert all(rate > 0 for rate in rates.values())
 
 
+
+@pytest.mark.parametrize(
+    ("precision", "scale", "enabled", "expected_scale"),
+    [
+        ("float16", 256.0, True, 256.0),
+        ("bfloat16", None, True, 65536.0),
+        ("float32", None, False, 65536.0),
+    ],
+)
+def test_smoke_precision_configuration(
+    tmp_path: Path, precision: str, scale: float | None,
+    enabled: bool, expected_scale: float,
+) -> None:
+    """Map the selected CLI mode and FP16 scale onto the existing AMP fields."""
+    cfg = configured_phase(
+        tmp_path, tmp_path / "weights.pt", tmp_path / "run", 7, "cuda:0", "a",
+        config_name=CONFIG_NAME, precision=precision, fp16_init_scale=scale,
+    )
+    assert cfg.optim.amp.enabled is enabled
+    assert cfg.optim.amp.amp_dtype == precision
+    assert cfg.optim.amp.init_scale == expected_scale
+
+
+@pytest.mark.parametrize(
+    ("precision", "scale"),
+    [("bfloat16", 256.0), ("float16", 0.0), ("float16", float("nan"))],
+)
+def test_smoke_rejects_invalid_scale_selection(
+    tmp_path: Path, precision: str, scale: float,
+) -> None:
+    """Reject a misplaced or unusable FP16 scale before a smoke run."""
+    with pytest.raises(ValueError, match="FP16 initial scale"):
+        configured_phase(
+            tmp_path, tmp_path / "weights.pt", tmp_path / "run", 7, "cuda:0", "a",
+            config_name=CONFIG_NAME, precision=precision, fp16_init_scale=scale,
+        )
+
+
+def test_preflight_auto_and_explicit_precision_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto retains BF16 preference and T4 FP16 scale 1; explicit choices hold."""
+    from contextlib import nullcontext
+    from training import smoke_recurrent_training as smoke
+
+    data = tmp_path / "data"
+    for scene in ("Scene01", "Scene02", "Scene06", "Scene18", "Scene20"):
+        (data / scene).mkdir(parents=True)
+    checkpoint = tmp_path / "weights.pt"
+    checkpoint.write_bytes(b"weights")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _index: SimpleNamespace(name="fake", major=7, minor=5))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _index: (100, 200))
+    monkeypatch.setattr(torch.cuda, "device", lambda _index: nullcontext())
+    monkeypatch.setattr(smoke, "inspect_sequential_episodes", lambda *_args, **_kwargs: {"train": {"scene": "Scene01"}, "validation": {"scene": "Scene20"}})
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda **_kwargs: False)
+    selected = preflight(data, checkpoint, "cuda:0", config_name=CONFIG_NAME)
+    assert (selected["requested_precision"], selected["precision"], selected["scaler_initial_scale"]) == ("auto", "float16", 1.0)
+    selected = preflight(data, checkpoint, "cuda:0", config_name=CONFIG_NAME, precision="float16", fp16_init_scale=256.0)
+    assert (selected["requested_precision"], selected["precision"], selected["scaler_initial_scale"]) == ("float16", "float16", 256.0)
+    selected = preflight(data, checkpoint, "cuda:0", config_name=CONFIG_NAME, precision="float32")
+    assert (selected["precision"], selected["autocast_enabled"], selected["scaler_enabled"]) == ("float32", False, False)
+    with pytest.raises(ValueError, match="native bfloat16"):
+        preflight(data, checkpoint, "cuda:0", config_name=CONFIG_NAME, precision="bfloat16")
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda **_kwargs: True)
+    selected = preflight(data, checkpoint, "cuda:0", config_name=CONFIG_NAME)
+    assert (selected["requested_precision"], selected["precision"], selected["scaler_enabled"]) == ("auto", "bfloat16", False)
+
+
+@pytest.mark.parametrize(
+    ("prior_request", "requested_mode", "precision", "scale", "mismatch"),
+    [
+        ("auto", "auto", "bfloat16", None, "precision"),
+        ("float16", "float16", "float16", 256.0, "scaler_initial_scale"),
+        ("auto", "float16", "float16", None, "requested_precision"),
+    ],
+)
+def test_phase_b_rejects_precision_or_scale_mismatch_before_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_request: str,
+    requested_mode: str, precision: str, scale: float | None, mismatch: str,
+) -> None:
+    """Reject changed requested or effective precision or scale before resume."""
+    from training import smoke_recurrent_training as smoke
+
+    output = tmp_path / "run"
+    output.mkdir()
+    checkpoint = output / "epoch_0000.pt"
+    checkpoint.write_bytes(b"saved")
+    prior = {"dataset_root": str(tmp_path), "checkpoint": {"path": "weights"},
+             "device": "cuda:0", "requested_precision": prior_request,
+             "precision": "float16", "scaler_initial_scale": 1.0, "episodes": {}}
+    (output / "summary.json").write_text(json.dumps({
+        "status": "phase_a_complete", "seed": 7, "config_name": CONFIG_NAME,
+        "a": {"status": "complete", "process_id": -1,
+              "checkpoint": str(checkpoint), "checkpoint_identity": smoke._file_identity(checkpoint)},
+        "preflight": prior,
+    }))
+    monkeypatch.setattr(smoke, "preflight", lambda *_args, **_kwargs: dict(prior, requested_precision=requested_mode, precision=precision, scaler_initial_scale=scale or 1.0))
+    monkeypatch.setattr(smoke, "execute_phase", lambda *_args: pytest.fail("resume was launched"))
+    status = main([
+        "--config", CONFIG_NAME, "--dataset-root", str(tmp_path),
+        "--pretrained-checkpoint", str(tmp_path / "weights.pt"),
+        "--output-dir", str(output), "--seed", "7", "--device", "cuda:0",
+        "--phase", "b", "--precision", requested_mode,
+        *(["--fp16-init-scale", str(scale)] if scale is not None else []),
+    ])
+    assert status == 1
+    report = json.loads((output / "summary.json").read_text())
+    assert f"phase_preflight.{mismatch}" in report["error"]
+    assert "b" not in report
+
 def test_changed_production_capabilities_cannot_claim_real_smoke(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

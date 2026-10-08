@@ -206,6 +206,119 @@ def test_e01a_preparation_preserves_local_geometry_and_metadata() -> None:
         assert item["images"].dtype == torch.float32
 
 
+
+@pytest.mark.parametrize(
+    ("enabled", "dtype", "mode", "autocast", "scaled"),
+    [
+        (False, "bfloat16", "float32", False, False),
+        (True, "bfloat16", "bfloat16", True, False),
+        (True, "float16", "float16", True, True),
+    ],
+)
+def test_e01a_precision_policy_is_shared_by_training_and_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    enabled: bool, dtype: str, mode: str, autocast: bool, scaled: bool,
+) -> None:
+    """Resolve one mode and pass the same autocast policy to both paths."""
+    cfg = config(tmp_path)
+    cfg["optim"]["amp"] = {"enabled": enabled, "amp_dtype": dtype, "init_scale": 256.0}
+    logger = RecordingLogger()
+    trainer = RecurrentTrainer(
+        cfg, train_episodes=source(1), validation_episodes=source(1),
+        model=TinyModel(), loss_fn=loss_fn, logger=logger,
+    )
+    assert trainer.precision_mode == mode
+    assert trainer.autocast_enabled is autocast
+    assert trainer.scaler.is_enabled() is scaled
+    assert trainer.scaler.get_scale() == (256.0 if scaled else 1.0)
+    assert logger.events[0]["precision_mode"] == mode
+    assert logger.events[0]["autocast_enabled"] is autocast
+    assert logger.events[0]["scaler_enabled"] is scaled
+    observed = []
+    original_autocast = torch.autocast
+
+    def record_autocast(*args, **kwargs):
+        """Capture the active precision context and delegate to PyTorch."""
+        observed.append((kwargs["enabled"], kwargs["dtype"]))
+        return original_autocast(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "autocast", record_autocast)
+    trainer.train_epoch(0)
+    trainer.validate_epoch(0)
+    assert observed == [(autocast, trainer.autocast_dtype)] * 2
+
+
+@pytest.mark.parametrize(
+    ("amp", "message"),
+    [
+        ({"enabled": True, "amp_dtype": "float64"}, "unsupported AMP dtype"),
+        ({"enabled": True, "amp_dtype": "float16", "init_scale": 0}, "initial scale"),
+    ],
+)
+def test_e01a_rejects_invalid_precision_configuration(
+    tmp_path: Path, amp: dict[str, object], message: str,
+) -> None:
+    """Reject an unknown dtype or unusable FP16 scale before allocating the model."""
+    cfg = config(tmp_path)
+    cfg["optim"]["amp"] = amp
+    with pytest.raises(ValueError, match=message):
+        RecurrentTrainer(
+            cfg, train_episodes=source(1), validation_episodes=source(1),
+            model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+        )
+
+
+def test_e01a_enabled_unsupported_autocast_fails_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never fall back to FP32 when enabled autocast is unavailable."""
+    cfg = config(tmp_path)
+    cfg["optim"]["amp"] = {"enabled": True, "amp_dtype": "bfloat16"}
+    monkeypatch.setattr(torch.amp.autocast_mode, "is_autocast_available", lambda _device: False)
+    with pytest.raises(ValueError, match="autocast is unavailable"):
+        RecurrentTrainer(
+            cfg, train_episodes=source(1), validation_episodes=source(1),
+            model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+        )
+
+
+def test_e01a_bfloat16_support_uses_selected_cuda_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check the target GPU and restore the caller's current GPU afterward."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("mixed-device BF16 check requires two CUDA devices")
+    observed: list[int] = []
+
+    def simulated_support(*, including_emulation: bool = False) -> bool:
+        """Simulate BF16 only on GPU 1 and record the queried current device."""
+        assert including_emulation is False
+        current = torch.cuda.current_device()
+        observed.append(current)
+        return current == 1
+
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", simulated_support)
+    cfg = config(tmp_path)
+    cfg["optim"]["amp"] = {"enabled": True, "amp_dtype": "bfloat16"}
+    cfg["device"] = "cuda:1"
+    with torch.cuda.device(0):
+        trainer = RecurrentTrainer(
+            cfg, train_episodes=source(1), validation_episodes=source(1),
+            model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+        )
+        assert trainer.precision_mode == "bfloat16"
+        assert torch.cuda.current_device() == 0
+    cfg["device"] = "cuda:0"
+    with torch.cuda.device(1):
+        with pytest.raises(ValueError, match="native bfloat16 autocast"):
+            RecurrentTrainer(
+                cfg, train_episodes=source(1), validation_episodes=source(1),
+                model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+            )
+        assert torch.cuda.current_device() == 1
+    assert observed == [1, 0]
+
+
 def test_e01a_one_episode_uses_real_step_once_and_validation_is_read_only(tmp_path: Path) -> None:
     """The actual step owns one update; validation preserves every training state."""
     model, logger = TinyModel(), RecordingLogger()

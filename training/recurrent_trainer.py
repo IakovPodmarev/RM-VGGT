@@ -252,7 +252,9 @@ class RecurrentTrainer:
         optimizer, scaler, clipper, logger, and optional preload or full resume.
         Construction performs no sequence update or distributed setup. The
         optional AMP initial scale configures fresh float16 training; full
-        resume replaces scaler state from the epoch checkpoint.
+        resume replaces scaler state from the epoch checkpoint. CUDA BF16
+        support is checked on the selected device without changing the
+        caller's current device.
         The optional diagnostic observes detached evidence around each update;
         the trainer does not retain episode graphs after logging.
         """
@@ -292,20 +294,39 @@ class RecurrentTrainer:
         torch.manual_seed(self.seed)
         if self.device.type == "cuda":
             torch.cuda.manual_seed_all(self.seed)
+        amp = cfg["optim"]["amp"]
+        dtype_name = amp["amp_dtype"]
+        if dtype_name not in {"float32", "bfloat16", "float16"}:
+            raise ValueError(f"unsupported AMP dtype: {dtype_name}")
+        self.precision_mode = dtype_name if amp["enabled"] else "float32"
+        if self.precision_mode == "float32":
+            self.autocast_enabled = False
+            self.autocast_dtype = torch.float32
+        else:
+            if not torch.amp.autocast_mode.is_autocast_available(self.device.type):
+                raise ValueError(f"{self.device.type} autocast is unavailable for {self.precision_mode}")
+            if self.device.type == "cuda":
+                if self.precision_mode == "bfloat16":
+                    with torch.cuda.device(self.device):
+                        if not torch.cuda.is_bf16_supported(including_emulation=False):
+                            raise ValueError("CUDA device does not support native bfloat16 autocast")
+                if self.precision_mode == "float16" and torch.cuda.get_device_capability(self.device)[0] < 6:
+                    raise ValueError("CUDA device does not support float16 autocast")
+            self.autocast_enabled = True
+            self.autocast_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[self.precision_mode]
+        initial_scale = float(amp.get("init_scale", 65536.0))
+        if self.precision_mode == "float16" and (not math.isfinite(initial_scale) or initial_scale <= 0):
+            raise ValueError("FP16 initial scale must be finite and positive")
+        self.scaler = torch.amp.GradScaler(
+            self.device.type, init_scale=initial_scale,
+            enabled=self.precision_mode == "float16",
+        )
         self.model = model if model is not None else hydra.utils.instantiate(OmegaConf.create(cfg["model"]))
         self.model.to(self.device)
         self.loss_fn = loss_fn if loss_fn is not None else hydra.utils.instantiate(OmegaConf.create(cfg["loss"]))
         self.optimizer = construct_optimizers(self.model, OmegaConf.create(cfg["optim"]))[0]
         self.gradient_clipper = hydra.utils.instantiate(OmegaConf.create(cfg["optim"]["gradient_clip"]))
         self.gradient_clipper.setup_clipping(self.model)
-        amp = cfg["optim"]["amp"]
-        self.autocast_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[amp["amp_dtype"]]
-        self.autocast_enabled = bool(amp["enabled"]) and torch.amp.autocast_mode.is_autocast_available(self.device.type)
-        self.scaler = torch.amp.GradScaler(
-            self.device.type,
-            init_scale=float(amp.get("init_scale", 65536.0)),
-            enabled=self.autocast_enabled and self.autocast_dtype == torch.float16,
-        )
         self.loss_weights = {
             "camera": float((cfg.get("loss", {}).get("camera") or {}).get("weight", 1.0)),
             "depth": float((cfg.get("loss", {}).get("depth") or {}).get("weight", 1.0)),
@@ -323,6 +344,9 @@ class RecurrentTrainer:
             "trainable_parameters": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
             "frozen_parameters": sum(p.numel() for p in self.model.parameters() if not p.requires_grad),
             "optimizer_group_counts": {group["name"]: sum(p.numel() for p in group["params"]) for group in self.optimizer.optimizer.param_groups},
+            "precision_mode": self.precision_mode,
+            "autocast_enabled": self.autocast_enabled,
+            "scaler_enabled": self.scaler.is_enabled(),
             **_git_metadata(),
         }
         logging_cfg = dict(cfg.get("logging", {}))

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -51,18 +52,24 @@ def configured_phase(
     *,
     config_name: str,
     precision: str = "float16",
+    fp16_init_scale: float | None = None,
 ):
     """Compose the production config and impose bounded smoke settings.
 
     Return a resolved DictConfig; reject an unsupported phase or changed
-    production resolution, model/loss contract, or precision. Phase A preloads weights, phase B
-    restores the epoch checkpoint. The 20-update horizon preserves positive
+    production resolution, model/loss contract, precision, or FP16 scale.
+    Phase A preloads weights; phase B restores the epoch checkpoint.
+    The 20-update horizon preserves positive
     warmup/cosine rates for both actual updates. The base config is not edited.
     """
     if phase not in {"a", "b"}:
         raise ValueError("phase must be a or b")
-    if precision not in {"bfloat16", "float16"}:
-        raise ValueError("precision must be bfloat16 or float16")
+    if precision not in {"float32", "bfloat16", "float16"}:
+        raise ValueError("precision must be float32, bfloat16, or float16")
+    if fp16_init_scale is not None and precision != "float16":
+        raise ValueError("FP16 initial scale requires float16 precision")
+    if fp16_init_scale is not None and (not math.isfinite(fp16_init_scale) or fp16_init_scale <= 0):
+        raise ValueError("FP16 initial scale must be finite and positive")
     cfg = load_config(config_name)
     if cfg.img_size != 518 or cfg.sequence.backprop_mode != "full":
         raise ValueError("production image size or backpropagation mode changed")
@@ -126,9 +133,10 @@ def configured_phase(
         if phase == "b"
         else None
     )
+    cfg.optim.amp.enabled = precision != "float32"
     cfg.optim.amp.amp_dtype = precision
     if precision == "float16":
-        cfg.optim.amp.init_scale = 1.0
+        cfg.optim.amp.init_scale = 1.0 if fp16_init_scale is None else fp16_init_scale
     if (
         cfg.training.episode_batch_size,
         cfg.training.accum_steps,
@@ -167,13 +175,15 @@ def preflight(
     *,
     config_name: str,
     seed: int = 42,
+    precision: str = "auto",
+    fp16_init_scale: float | None = None,
 ) -> dict[str, Any]:
     """Reject missing real prerequisites and inspect one episode from each split.
 
-    Return dataset/checkpoint identities, GPU/software evidence, resolved AMP
-    precision, and observed frame geometry. Native bfloat16 is preferred;
-    float16 is explicit on CUDA hardware with suitable compute capability and
-    uses the trainer's enabled GradScaler. No model or optimizer is allocated.
+    Return dataset/checkpoint identities, GPU/software evidence, requested
+    and effective precision, scale, and observed frame geometry. Auto prefers
+    native BF16 and otherwise selects FP16. Explicit unsupported choices fail.
+    No model or optimizer is allocated.
     """
     if not dataset_root.is_dir():
         raise FileNotFoundError(f"VKITTI dataset root is missing: {dataset_root}")
@@ -196,11 +206,15 @@ def preflight(
     free, total = torch.cuda.mem_get_info(index)
     with torch.cuda.device(index):
         native_bfloat16 = torch.cuda.is_bf16_supported(including_emulation=False)
-    if not native_bfloat16 and props.major < 6:
-        raise ValueError(
-            "device has neither native bfloat16 nor supported float16 precision"
-        )
-    precision = "bfloat16" if native_bfloat16 else "float16"
+    if precision not in {"auto", "bfloat16", "float16", "float32"}:
+        raise ValueError(f"unsupported precision: {precision}")
+    selected_precision = ("bfloat16" if native_bfloat16 else "float16") if precision == "auto" else precision
+    if selected_precision == "bfloat16" and not native_bfloat16:
+        raise ValueError("CUDA device does not support native bfloat16 autocast")
+    if selected_precision == "float16" and props.major < 6:
+        raise ValueError("CUDA device does not support float16 autocast")
+    if selected_precision != "float32" and not torch.amp.autocast_mode.is_autocast_available("cuda"):
+        raise ValueError(f"CUDA autocast is unavailable for {selected_precision}")
     cfg = configured_phase(
         dataset_root,
         checkpoint,
@@ -209,7 +223,8 @@ def preflight(
         device,
         "a",
         config_name=config_name,
-        precision=precision,
+        precision=selected_precision,
+        fp16_init_scale=fp16_init_scale,
     )
     train = RecurrentTrainer._configured_source(cfg.episode_sources.train)
     validation = RecurrentTrainer._configured_source(cfg.episode_sources.validation)
@@ -233,7 +248,10 @@ def preflight(
         "device_free_bytes": free,
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
-        "precision": precision,
+        "requested_precision": precision,
+        "precision": selected_precision,
+        "autocast_enabled": bool(cfg.optim.amp.enabled),
+        "scaler_enabled": selected_precision == "float16",
         "scaler_initial_scale": float(cfg.optim.amp.init_scale),
         "schedule": {
             "segment_frames": int(cfg.sequence.segment_frames),
@@ -384,6 +402,7 @@ def execute_phase(
         args.phase,
         config_name=args.config,
         precision=preflight_result["precision"],
+        fp16_init_scale=(preflight_result["scaler_initial_scale"] if preflight_result["precision"] == "float16" else None),
     )
     logger = EvidenceLogger(cfg, output)
     progress = (1 if args.phase == "a" else 2) / 20
@@ -438,6 +457,7 @@ def execute_phase(
         "restoration": restoration,
         "base_learning_rates": dict(cfg.optim.learning_rates),
         "scaler_scale_after": float(trainer.scaler.get_scale()),
+        "precision_policy": {key: trainer.run_metadata[key] for key in ("precision_mode", "autocast_enabled", "scaler_enabled")},
         "events": logger.events,
         "checkpoint": str(path.resolve()),
         "checkpoint_identity": _file_identity(path),
@@ -457,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     must be invoked in a new process. Zero exit means the requested phase passed;
     only phase B can mark the two-phase workflow complete. No phase is launched
     by a subprocess from here, so the operator controls the resume boundary.
+    Phase B requires the same requested and effective precision and scale as A.
     """
     parser = argparse.ArgumentParser(
         description="Audited real-data recurrent training and resume smoke"
@@ -472,6 +493,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", required=True)
     parser.add_argument("--phase", choices=("a", "b"), default="a")
+    parser.add_argument("--precision", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--fp16-init-scale", type=float)
     args = parser.parse_args(argv)
     output = Path(args.output_dir)
     if args.phase == "a":
@@ -529,6 +552,8 @@ def main(argv: list[str] | None = None) -> int:
             args.device,
             config_name=args.config,
             seed=args.seed,
+            precision=args.precision,
+            fp16_init_scale=args.fp16_init_scale,
         )
         if args.phase == "b":
             previous = report["preflight"]
@@ -536,7 +561,9 @@ def main(argv: list[str] | None = None) -> int:
                 "dataset_root",
                 "checkpoint",
                 "device",
+                "requested_precision",
                 "precision",
+                "scaler_initial_scale",
                 "episodes",
             ):
                 _same(previous[key], fresh_preflight[key], f"phase_preflight.{key}")

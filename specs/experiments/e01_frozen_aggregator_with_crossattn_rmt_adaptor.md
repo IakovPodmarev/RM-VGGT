@@ -9,11 +9,13 @@ aggregation, optimizer behavior, and dataset contract are fixed below. Slices
 1–7 were implemented against the original three-segment, eight-frame schedule.
 Slice 8 added configurable frame counts. A two-phase real-data smoke at five
 frames per segment and three segments completed both updates, validation, and
-checkpoint resume on one Tesla T4; independent code and evidence review is
-pending. The E01 test suite reported 159 passes. The review follow-ups on
-camera masking, AMP update accounting, and depth-adaptor gradients are not
-implemented and do not block an exploratory E01a training run. Offline evaluation and
-point-cloud visualization in slices 9–10 remain unimplemented.
+checkpoint resume on one Tesla T4. Slice 8.1 is implemented in the current
+worktree: camera-label validity now controls camera loss, and ordinary training
+counts only actual optimizer steps. Its E01 suite reported 169 passes; the
+three-episode float16 gradient audit and incomplete full-precision probe are
+recorded below. Independent review of the slice 8.1 diff remains pending.
+Offline evaluation and point-cloud visualization in slices 9–10 remain
+unimplemented.
 
 ## Objective
 
@@ -40,11 +42,10 @@ Existing interfaces that call the episode length `total_frames` may retain
 that name, but its value is the derived `episode_frames`, not an independent
 setting.
 
-The checked-in E01a YAML currently defaults to three frames per segment. The
-successful 15-frame smoke selected five frames explicitly. An immediate run
-at the active five-frame profile must likewise record the exact invocation
-and fully resolved configuration; a default YAML launch is a different
-nine-frame profile. Do not pool results from those profiles.
+The current E01a YAML defaults to five frames per segment and three segments.
+The earlier 15-frame smoke selected five frames by override while the YAML
+still defaulted to three. Record the exact invocation and resolved configuration
+for every run; do not pool results from different schedules.
 
 ## Architectural scope
 
@@ -514,19 +515,29 @@ The E01a sequential adapter must:
   camera stream
 - keep frame IDs strictly increasing with stride `1`
 - disallow duplicated or randomly permuted frame IDs
-- choose only start indices for which all `episode_frames` frames exist
+- choose complete `episode_frames` windows at a five-frame start stride
+  within each scene/variation/camera stream, so adjacent 15-frame episodes
+  overlap by ten frames
+- use every eligible window in each training and validation epoch; incomplete
+  trailing fragments do not form episodes
 - preserve the same scene/variation/camera identity across all segments
 - return frame IDs and segment indices for audit logging
 - disable tracking data and the point prediction branch
 
 The fixed scene-disjoint split is:
 
-- training: `Scene01`, `Scene02`, `Scene06`, and `Scene18`
-- validation: `Scene20`
+- training: `Scene01`, `Scene06`, `Scene18`, and `Scene20`
+- validation: `Scene02`
 
 All weather/lighting variations and both camera streams may be used, but a
-single episode cannot cross a variation or camera boundary. Validation
-uses fixed start indices and no random augmentation. The initial E01a profile
+single episode cannot cross a variation or camera boundary. The same
+five-frame start stride applies to training and validation. Training shuffles
+eligible episodes each epoch; validation uses fixed start indices, fixed order,
+and no random augmentation. Frames may appear in multiple episodes within
+the same split, so validation losses are episode-weighted and adjacent results
+are correlated. The old Scene20 validation split is superseded by this
+Scene02 split; runs using the two splits must be reported separately.
+The initial E01a profile
 also disables training-time random scale, color, grayscale, blur, orientation,
 and frame-order augmentation so that recurrence is the controlled change.
 Deterministic resize/crop to `518 x 518` and its corresponding intrinsics update
@@ -688,13 +699,17 @@ normalization:
 - track loss disabled
 - no auxiliary memory, reconstruction, gate, or specialization loss
 
-The currently implemented inherited camera loss uses the first frame's point
-mask to decide whether to supervise an entire segment. If that frame has 100
-or fewer valid points, its camera loss is zero while depth loss still
-contributes. It does not skip the episode or optimizer update. This behavior
-is retained for the immediate exploratory run so that no unimplemented
-eligibility change is mistaken for current behavior. The proposed whole-episode
-skip policy is a later design and implementation follow-up.
+Camera supervision follows camera-label validity, independently of depth and
+point masks. The sequential VKITTI adaptor guarantees a matched, finite camera
+label for every emitted frame, so all its frames contribute. Other adaptors may
+supply a frame-aligned boolean `camera_valid_mask`; when absent, the adaptor
+must guarantee complete valid labels. Marked-valid targets must be finite and
+have positive focal lengths. Camera loss averages over the valid frames and
+raises if none remain in a segment, before sequence-loss aggregation. Segment
+normalization also requires a valid first camera and at least one valid point
+somewhere in the segment for its point-derived scale; an empty point set is an
+explicit error. These are eligibility failures, not silent zero-loss segments.
+The general dataset-adaptor requirement is in `specs/01_target_architecture.md`.
 
 Each `L[t]` is the segment-local `objective` returned by `MultitaskLoss`. Equal
 weighting is deliberate because all segments contain `segment_frames` frames.
@@ -722,10 +737,24 @@ The accepted E01a defaults are:
 - initial per-device episode batch size: `1`
 - gradient accumulation: `1` until the one-episode path is validated; later
   changes must scale `L_sequence` once, not each segment independently
-- optimizer update: exactly once after the complete episode backward
-- training budget: 20 epochs with at most 800 training episodes per epoch
-- validation: every epoch with at most 400 fixed validation episodes
+- optimizer update: one attempt after the complete episode backward; a skipped
+  float16-scaled attempt is not a completed update
+- training budget: 20 epochs, traversing every eligible training episode
+  in each epoch
+- validation: every epoch over every eligible fixed validation episode
+- update schedule: derive its planned update horizon from the training
+  manifest size and epoch count; retain explicit small episode limits for
+  smoke and diagnostic runs only
 - checkpoint: every epoch plus the lowest aggregate validation-objective model
+
+The ordinary trainer detects whether `GradScaler.step` invoked AdamW. On an
+overflow skip it updates the scaler, restores the prior learning rates, logs a
+skipped attempt, and leaves `completed_updates` and scheduler progress unchanged.
+The next episode retries the same update position. Checkpoints store actual
+completed updates and skipped-attempt counts; older checkpoints lacking the
+latter restore it as zero. Every eligible episode is still attempted once per
+epoch in a full run, so skips may leave fewer completed updates than scheduled
+at the end of that run.
 
 The learned initial memory is a trainable parameter and belongs to the memory
 parameter group. The frozen aggregator is excluded from all optimizer and
@@ -796,34 +825,35 @@ least three seeds, per-segment and aggregate losses/metrics, trainable parameter
 counts, runtime, and peak VRAM. No improvement claim is made from the synthetic
 fixture or one-sample overfit test.
 
-## Deferred review findings for the exploratory run
+## Slice 8.1 evidence and remaining questions
 
-The following findings remain open. They do not prevent launching the
-five-frame, three-segment exploratory experiment, but they limit what its
-results can establish and must be addressed before a final scientific claim:
+The current staged implementation removes the inherited first-frame point-mask
+camera gate and makes ordinary float16 update accounting depend on an actual
+underlying AdamW call. Focused tests cover camera masks and empty eligibility,
+a forced skipped attempt followed by a real update, learning-rate restoration,
+and checkpoint resume. The E01 suite reported 169 passes with two existing
+Hydra warnings; the run record is
+`/var/tmp/rm-vggt-slice81-audit/audit_notes.md` on `tesla`.
 
-1. The inherited camera loss uses only each segment's first-frame point mask
-   to decide camera supervision for all its frames. It can omit valid later
-   frames or supervise invalid ones. No whole-episode skip policy has been
-   implemented. Record this inherited behavior when interpreting camera loss;
-   changing it requires a separately reviewed loss-policy update.
-2. In the ordinary trainer's float16 AMP path, `GradScaler` may skip AdamW on
-   nonfinite gradients while `completed_updates` and schedule progress still
-   advance. The audited two-phase smoke verified actual optimizer steps, but
-   that diagnostic does not make the ordinary long-run accounting correct.
-   Treat update counts as provisional if overflow occurs, and do not infer
-   that every counted attempt changed weights until the accounting is fixed.
-3. The completed smoke reported nonzero gradients in 23 of 41 depth-read-
-   adaptor parameter tensors in phase A and only the residual gate in phase B.
-   AdamW momentum and weight decay can change weights even when current
-   gradients are zero. This is a training-signal question, not proof of a
-   broken update; diagnose it before claiming that the adaptor body learns
-   reliably.
+A targeted float16 audit used the active `3 x 5`, `518 x 518` profile, seed 42,
+scaler initial scale 1.0, and three distinct real VKITTI training episodes.
+All three attempts called AdamW and none was skipped. The depth read adaptor
+had nonzero current gradients in 23/41, 3/41, then 1/41 parameter tensors.
+On the final episode only the residual gate had a nonzero current gradient.
+Many tensors still changed when their current gradients were zero; AdamW
+momentum and weight decay can account for those changes. The detached per-tensor
+norms, zero-element counts, episode identities, losses, scaler scale, and step
+counts are in `/var/tmp/rm-vggt-slice81-audit/float16.json` on `tesla`.
 
-The exploratory run should retain its raw logs, resolved config, checkpoints,
-losses, learning rates, runtime, and memory evidence. A successful launch or
-decreasing loss does not close these follow-ups, establish a controlled
-comparison, or validate the longer eight-frame-per-segment scale-up.
+A same-episode full-precision probe ran out of T4 memory in the third segment
+before the depth head and before backward. Its report is
+`/var/tmp/rm-vggt-slice81-audit/float32_probe.json`. Float16 underflow remains
+a plausible explanation, not a demonstrated cause. Diagnose the repeated
+weak or zero depth-adaptor body gradients before claiming that its main body
+learns reliably. These three updates are diagnostic evidence, not a controlled
+training outcome or scientific comparison. Retain raw logs, resolved configs,
+checkpoints, losses, learning rates, runtime, and memory evidence for any
+exploratory run. The 24-frame scale-up remains unverified.
 
 ## Implementation sequence
 
@@ -839,6 +869,8 @@ Implementation proceeds in small verified slices:
 8. make frame counts configurable, then run the real VKITTI end-to-end
    training and checkpoint-resume smoke test at the active five-frame,
    three-segment schedule
+8.1. correct camera-label eligibility and skipped-update accounting, then
+     audit depth-adaptor current gradients across real episodes
 9. add and test offline episode-level Sim(3)-aligned ATE and point RMSE
 10. add and test point-cloud visualization based on existing utilities
 11. run one-sample overfit, then the controlled multi-seed experiment
@@ -892,12 +924,12 @@ E01a must preserve the following:
   in a fixed-length episode.
 - Full BPTT retains trainable camera/DPT/writer/adaptor activations for all
   configured segments and may exceed the target GPU budget at `518 x 518`.
-- In the completed five-frame, three-segment smoke, the depth read adaptor had
-  nonzero gradients in 23 of 41 parameter tensors on the first update but
-  only its residual gate on the resumed update. AdamW momentum and weight
-  decay can change parameters without a nonzero current gradient. Diagnose
-  this pattern before claiming that the adaptor body learns reliably in a
-  longer run; the two successful optimizer steps alone do not settle it.
+- The slice 8.1 three-episode float16 audit found nonzero current gradients
+  in 23/41, 3/41, and 1/41 depth read-adaptor parameter tensors. The last
+  episode reached only the residual gate. AdamW momentum and weight decay
+  changed some tensors with zero current gradients. The full-precision probe
+  exhausted T4 memory before backward, so the cause and reliability of the
+  adaptor body's learning remain unresolved.
 - The initial `0.1` adaptor residual gates trade exact baseline equivalence for
   immediate gradient flow into the new memory path.
 - A scene-disjoint VKITTI split has few validation scenes, so multi-seed
