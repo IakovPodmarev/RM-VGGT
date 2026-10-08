@@ -129,7 +129,11 @@ def inspect_sequential_episodes(
 
 
 def main() -> None:
-    """Inspect a configured VKITTI root from argparse without launching training."""
+    """Inspect the resolved train and validation sources without training.
+
+    Use the configured scene splits, start strides, seed, frame count, and
+    image size so this CLI reports the same episode schedule as the trainer.
+    """
     parser = argparse.ArgumentParser(description="Inspect sequential VKITTI episodes")
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--config", default="e01a_frozen_aggregator_streaming")
@@ -142,18 +146,20 @@ def main() -> None:
     sequence = cfg.sequence
     train = SequentialVKittiEpisodeSource(
         args.dataset_root,
-        ("Scene01", "Scene02", "Scene06", "Scene18"),
+        cfg.dataset_split.train,
         training=True,
-        seed=42,
+        seed=cfg.seed_value,
         total_frames=sequence.total_frames,
+        episodes_windows_stride=cfg.episode_sources.train.episodes_windows_stride,
         image_size=cfg.img_size,
     )
     validation = SequentialVKittiEpisodeSource(
         args.dataset_root,
-        ("Scene20",),
+        cfg.dataset_split.validation,
         training=False,
-        seed=42,
+        seed=cfg.seed_value,
         total_frames=sequence.total_frames,
+        episodes_windows_stride=cfg.episode_sources.validation.episodes_windows_stride,
         image_size=cfg.img_size,
     )
     for phase, details in inspect_sequential_episodes(

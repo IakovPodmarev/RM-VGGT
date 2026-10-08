@@ -247,8 +247,11 @@ class RecurrentTrainer:
     ) -> None:
         """Construct from resolved config and optional test collaborators.
 
+        Preserve explicitly supplied sources, including empty manifests.
         Reject missing episode sources, unsupported sequence or accumulation
-        settings, and invalid one-device limits. Initialize model, loss,
+        settings, and invalid one-device limits. Unset limits traverse every
+        episode; an unset update horizon uses the manifest or explicit limit
+        and epoch count. Initialize model, loss,
         optimizer, scaler, clipper, logger, and optional preload or full resume.
         Construction performs no sequence update or distributed setup. The
         optional AMP initial scale configures fresh float16 training; full
@@ -265,8 +268,14 @@ class RecurrentTrainer:
         if self.device.type not in {"cpu", "cuda"} or (self.device.type == "cuda" and not torch.cuda.is_available()):
             raise ValueError("recurrent training requires one available CPU or CUDA device")
         sources = cfg.get("episode_sources") or {}
-        self.train_episodes = train_episodes or self._configured_source(sources.get("train"))
-        self.validation_episodes = validation_episodes or self._configured_source(sources.get("validation"))
+        self.train_episodes = (
+            train_episodes if train_episodes is not None
+            else self._configured_source(sources.get("train"))
+        )
+        self.validation_episodes = (
+            validation_episodes if validation_episodes is not None
+            else self._configured_source(sources.get("validation"))
+        )
         if self.train_episodes is None or self.validation_episodes is None:
             raise ValueError("recurrent training requires sequential train and validation episode sources")
         sequence = cfg["sequence"]
@@ -277,13 +286,35 @@ class RecurrentTrainer:
         validation = cfg["validation"]
         if training.get("episode_batch_size") != 1 or training.get("accum_steps") != 1:
             raise ValueError("recurrent training requires episode batch size and accumulation of one")
-        self.train_limit = int(training["max_episodes_per_epoch"])
-        self.validation_limit = int(validation["max_episodes_per_epoch"])
+        self.train_limit = (
+            int(training["max_episodes_per_epoch"])
+            if training.get("max_episodes_per_epoch") is not None else None
+        )
+        self.validation_limit = (
+            int(validation["max_episodes_per_epoch"])
+            if validation.get("max_episodes_per_epoch") is not None else None
+        )
         self.max_epochs = int(cfg["max_epochs"])
-        self.scheduled_updates = int(training["scheduled_updates"])
-        if min(self.train_limit, self.validation_limit, self.max_epochs, self.scheduled_updates) <= 0:
-            raise ValueError("episode limits, epochs, and scheduled updates must be positive")
-        if self.scheduled_updates < self.max_epochs * self.train_limit:
+        if self.max_epochs <= 0 or any(
+            limit is not None and limit <= 0
+            for limit in (self.train_limit, self.validation_limit)
+        ):
+            raise ValueError("episode limits and epochs must be positive")
+        episodes_per_epoch = self.train_limit
+        if episodes_per_epoch is None:
+            if not hasattr(self.train_episodes, "__len__"):
+                raise ValueError("automatic update horizon requires a sized training source")
+            episodes_per_epoch = len(self.train_episodes)
+            if episodes_per_epoch <= 0:
+                raise ValueError("training manifest contains no eligible episodes")
+        configured_updates = training.get("scheduled_updates")
+        if configured_updates is None:
+            self.scheduled_updates = self.max_epochs * episodes_per_epoch
+        else:
+            self.scheduled_updates = int(configured_updates)
+        if self.scheduled_updates <= 0:
+            raise ValueError("scheduled updates must be positive")
+        if self.scheduled_updates < self.max_epochs * episodes_per_epoch:
             raise ValueError("scheduled updates must cover the configured training budget")
         self.total_frames = int(sequence["total_frames"])
         self.segment_frames = int(sequence["segment_frames"])

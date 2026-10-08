@@ -75,6 +75,63 @@ def source(root: Path | None, scenes: list[str], training: bool) -> SequentialVK
     return SequentialVKittiEpisodeSource(root, scenes, training=training, seed=17, total_frames=24, image_size=14)
 
 
+@pytest.mark.parametrize(
+    ("total_frames", "episodes_windows_stride", "expected"),
+    [
+        (15, 5, [0, 5, 10, 15]),
+        (8, 3, [0, 3, 6, 9, 12, 15, 18, 21]),
+    ],
+)
+def test_manifest_enumerates_complete_strided_windows(
+    tmp_path: Path, total_frames: int, episodes_windows_stride: int, expected: list[int],
+) -> None:
+    """Enumerate every complete start at the configured stride, without a tail."""
+    write_stream(tmp_path, "Scene01", "clone", 0, list(range(30)))
+    item = SequentialVKittiEpisodeSource(
+        tmp_path, ["Scene01"], training=False, seed=17,
+        total_frames=total_frames, episodes_windows_stride=episodes_windows_stride, image_size=14,
+    )
+    windows = item._manifest()
+    assert [window.start_frame_id for window in windows] == expected
+    assert all(window.frame_ids == tuple(range(start, start + total_frames))
+               for window, start in zip(windows, expected))
+
+
+def test_manifest_resets_stride_at_gaps_and_stream_boundaries(tmp_path: Path) -> None:
+    """A gap, camera, variation, or scene starts its own eligible window run."""
+    write_stream(tmp_path, "Scene01", "clone", 0, list(range(9)) + list(range(12, 21)))
+    write_stream(tmp_path, "Scene01", "clone", 1, list(range(5, 14)))
+    write_stream(tmp_path, "Scene01", "fog", 0, list(range(3, 12)))
+    write_stream(tmp_path, "Scene02", "clone", 0, list(range(9)))
+    item = SequentialVKittiEpisodeSource(
+        tmp_path, ["Scene01", "Scene02"], training=False, seed=17,
+        total_frames=5, episodes_windows_stride=3, image_size=14,
+    )
+    assert [(w.scene, w.variation, w.camera_id, w.start_frame_id)
+            for w in item._manifest()] == [
+        ("Scene01", "clone", "Camera_0", 0),
+        ("Scene01", "clone", "Camera_0", 3),
+        ("Scene01", "clone", "Camera_0", 12),
+        ("Scene01", "clone", "Camera_0", 15),
+        ("Scene01", "clone", "Camera_1", 5),
+        ("Scene01", "clone", "Camera_1", 8),
+        ("Scene01", "fog", "Camera_0", 3),
+        ("Scene01", "fog", "Camera_0", 6),
+        ("Scene02", "clone", "Camera_0", 0),
+        ("Scene02", "clone", "Camera_0", 3),
+    ]
+
+
+@pytest.mark.parametrize("stride", [0, -1, True, 1.5])
+def test_source_rejects_invalid_episodes_windows_stride(tmp_path: Path, stride: object) -> None:
+    """Reject nonpositive and noninteger start strides before manifest loading."""
+    with pytest.raises(ValueError, match="episodes_windows_stride"):
+        SequentialVKittiEpisodeSource(
+            tmp_path, ["Scene01"], training=False, seed=17,
+            total_frames=5, episodes_windows_stride=stride, image_size=14,
+        )
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     """Populate sorted train and validation streams with overlapping windows."""
@@ -97,6 +154,38 @@ def test_config_composes_source_targets() -> None:
     assert cfg.episode_sources.train._target_ == "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource"
     assert cfg.episode_sources.validation._target_ == "data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource"
     assert (cfg.sequence.total_frames, cfg.sequence.segment_frames, cfg.sequence.num_segments) == (15, 5, 3)
+    assert list(cfg.dataset_split.train) == ["Scene01", "Scene06", "Scene18", "Scene20"]
+    assert list(cfg.dataset_split.validation) == ["Scene02"]
+    assert cfg.episode_sources.train.episodes_windows_stride == 5
+    assert cfg.episode_sources.validation.episodes_windows_stride == 5
+
+
+def test_inspector_main_uses_configured_episode_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI passes the resolved split and stride to its source instances."""
+    import inspect_sequential_episodes as inspector
+
+    captured = {}
+
+    def record(train, validation, **kwargs):
+        """Capture source settings without decoding dataset frames."""
+        captured["train"] = (train.scenes, train.episodes_windows_stride)
+        captured["validation"] = (validation.scenes, validation.episodes_windows_stride)
+        captured["total_frames"] = kwargs["total_frames"]
+        return {}
+
+    monkeypatch.setattr(inspector, "inspect_sequential_episodes", record)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["inspect_sequential_episodes", "--dataset-root", str(tmp_path)],
+    )
+    inspector.main()
+    assert captured == {
+        "train": (("Scene01", "Scene06", "Scene18", "Scene20"), 5),
+        "validation": (("Scene02",), 5),
+        "total_frames": 15,
+    }
 
 
 def test_scene_filtering_ordering_and_cpu_raw_contract(root: Path) -> None:
@@ -199,7 +288,7 @@ def test_hydra_root_override_instantiates_both_sources(root: Path) -> None:
     validation = RecurrentTrainer._configured_source(specs["validation"])
     assert train is not None and validation is not None
     assert next(iter(train(0)))["images"].shape == (1, cfg.sequence.total_frames, 3, 14, 14)
-    assert next(iter(validation(0)))["episode_metadata"]["scene"] == "Scene20"
+    assert next(iter(validation(0)))["episode_metadata"]["scene"] == "Scene02"
 
 
 def test_partial_streams_cannot_cross_camera_or_variation(tmp_path: Path) -> None:

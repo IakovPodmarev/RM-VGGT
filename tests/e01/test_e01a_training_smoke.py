@@ -127,7 +127,7 @@ def test_config_is_bounded_and_base_file_unchanged(tmp_path: Path) -> None:
         == 1
     )
     assert first.logging.mode == second.logging.mode == "offline"
-    assert first.img_size == 518 and list(first.dataset_split.validation) == ["Scene20"]
+    assert first.img_size == 518 and list(first.dataset_split.validation) == ["Scene02"]
     assert (
         first.sequence.total_frames,
         first.sequence.segment_frames,

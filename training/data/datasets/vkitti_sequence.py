@@ -64,16 +64,21 @@ class SequentialVKittiEpisodeSource:
         training: bool,
         seed: int,
         total_frames: int,
+        episodes_windows_stride: int = 1,
         image_size: int = 518,
     ) -> None:
         """Store source settings; reject invalid dimensions and empty scene sets.
 
         The configured positive total frame count defines complete windows.
+        Start stride is measured from the first eligible frame of each
+        contiguous stream run; incomplete trailing frames are discarded.
         A null root is accepted here for Hydra composition. The first call
         raises an actionable error if the root is null or absent.
         """
         if not isinstance(total_frames, int) or isinstance(total_frames, bool) or total_frames <= 0:
             raise ValueError("total_frames must be a positive integer")
+        if not isinstance(episodes_windows_stride, int) or isinstance(episodes_windows_stride, bool) or episodes_windows_stride <= 0:
+            raise ValueError("episodes_windows_stride must be a positive integer")
         if image_size <= 0:
             raise ValueError("image_size must be positive")
         self.dataset_root = Path(dataset_root) if dataset_root is not None else None
@@ -83,9 +88,14 @@ class SequentialVKittiEpisodeSource:
         self.training = bool(training)
         self.seed = int(seed)
         self.total_frames = total_frames
+        self.episodes_windows_stride = episodes_windows_stride
         self.image_size = image_size
         self.manifest: tuple[VKittiEpisodeWindow, ...] | None = None
         self._camera_rows: dict[tuple[str, str, str], dict[int, tuple[np.ndarray, np.ndarray]]] = {}
+
+    def __len__(self) -> int:
+        """Return the number of complete eligible windows in the cached manifest."""
+        return len(self._manifest())
 
     def __call__(self, epoch: int) -> Iterable[RawEpisode]:
         """Return a lazy iterable of complete episodes for an integer epoch.
@@ -107,7 +117,7 @@ class SequentialVKittiEpisodeSource:
             yield self._load(window)
 
     def _manifest(self) -> tuple[VKittiEpisodeWindow, ...]:
-        """Build once from sorted scene, variation, camera, and start identities."""
+        """Build complete strided windows separately within contiguous streams."""
         if self.manifest is not None:
             return self.manifest
         root = self.dataset_root
@@ -149,10 +159,19 @@ class SequentialVKittiEpisodeSource:
                         and (depth_root / f"depth_{frame:05d}.png").is_file()
                         and frame in rows
                     }
+                    previous = None
+                    run_start = 0
                     for start in sorted(valid):
+                        if previous is None or start != previous + 1:
+                            run_start = start
+                        previous = start
+                        if (start - run_start) % self.episodes_windows_stride:
+                            continue
                         frame_ids = tuple(range(start, start + self.total_frames))
                         if all(frame in valid for frame in frame_ids):
-                            windows.append(VKittiEpisodeWindow(scene, variation, camera, start, frame_ids))
+                            windows.append(VKittiEpisodeWindow(
+                                scene, variation, camera, start, frame_ids,
+                            ))
                     self._camera_rows[(scene, variation, camera)] = rows
         self.manifest = tuple(sorted(
             windows,

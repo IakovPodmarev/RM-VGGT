@@ -515,9 +515,10 @@ The E01a sequential adapter must:
   camera stream
 - keep frame IDs strictly increasing with stride `1`
 - disallow duplicated or randomly permuted frame IDs
-- choose complete `episode_frames` windows at a five-frame start stride
-  within each scene/variation/camera stream, so adjacent 15-frame episodes
-  overlap by ten frames
+- choose complete `episode_frames` windows at a configured positive start
+  stride within each contiguous scene/variation/camera run; the active profile
+  uses a five-frame stride and 15-frame episodes, so adjacent episodes overlap
+  by ten frames
 - use every eligible window in each training and validation epoch; incomplete
   trailing fragments do not form episodes
 - preserve the same scene/variation/camera identity across all segments
@@ -530,16 +531,17 @@ The fixed scene-disjoint split is:
 - validation: `Scene02`
 
 All weather/lighting variations and both camera streams may be used, but a
-single episode cannot cross a variation or camera boundary. The same
-five-frame start stride applies to training and validation. Training shuffles
-eligible episodes each epoch; validation uses fixed start indices, fixed order,
+single episode cannot cross a variation or camera boundary. Episode length
+comes from the configured segment schedule, and start stride is a separate
+configurable source setting. The active profile uses stride five for both
+training and validation.
+Training shuffles eligible episodes each epoch; validation uses fixed start indices, fixed order,
 and no random augmentation. Frames may appear in multiple episodes within
 the same split, so validation losses are episode-weighted and adjacent results
 are correlated. The old Scene20 validation split is superseded by this
 Scene02 split; runs using the two splits must be reported separately.
-The initial E01a profile
-also disables training-time random scale, color, grayscale, blur, orientation,
-and frame-order augmentation so that recurrence is the controlled change.
+The initial E01a profile also disables training-time random scale, color,
+grayscale, blur, orientation, and frame-order augmentation so that recurrence is the controlled change.
 Deterministic resize/crop to `518 x 518` and its corresponding intrinsics update
 remain enabled.
 

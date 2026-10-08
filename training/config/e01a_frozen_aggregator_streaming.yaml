@@ -31,13 +31,13 @@ sequence:
   backprop_mode: ${e01a.backprop_mode}
 
 training:
-  max_episodes_per_epoch: 800
+  max_episodes_per_epoch: null
   episode_batch_size: 1
   accum_steps: 1
-  scheduled_updates: 16000
+  scheduled_updates: null
 
 validation:
-  max_episodes_per_epoch: 400
+  max_episodes_per_epoch: null
 
 vkitti_root: null
 
@@ -49,6 +49,7 @@ episode_sources:
     training: true
     seed: ${seed_value}
     total_frames: ${sequence.total_frames}
+    episodes_windows_stride: 5
     image_size: ${img_size}
   validation:
     _target_: data.datasets.vkitti_sequence.SequentialVKittiEpisodeSource
@@ -57,11 +58,12 @@ episode_sources:
     training: false
     seed: ${seed_value}
     total_frames: ${sequence.total_frames}
+    episodes_windows_stride: 5
     image_size: ${img_size}
 
 dataset_split:
-  train: [Scene01, Scene02, Scene06, Scene18]
-  validation: [Scene20]
+  train: [Scene01, Scene06, Scene18, Scene20]
+  validation: [Scene02]
 
 memory:
   enabled: true

@@ -19,6 +19,7 @@ if str(TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(TRAINING_ROOT))
 
 from launch import load_config, make_trainer
+from training.data.datasets.vkitti_sequence import SequentialVKittiEpisodeSource
 from training.recurrent_trainer import RecurrentTrainer, iter_prepared_segments, transfer_segment_to_device
 
 
@@ -386,6 +387,94 @@ def test_e01a_limits_are_exact_and_memory_resets_per_phase(tmp_path: Path) -> No
     assert model.initial_calls == 3
     assert len(model.first_memories) == 3
     assert all(memory.shape == (1, 1, 1) for memory in model.first_memories)
+
+
+def test_e01a_full_manifest_epochs_derive_horizon_and_resume(tmp_path: Path) -> None:
+    """Full epochs traverse both sources and retain the derived horizon on resume."""
+    class SizedSource:
+        """Expose a fixed episode manifest without loading VKITTI tensors."""
+
+        def __init__(self, count: int) -> None:
+            """Store the number of episodes yielded in each epoch."""
+            self.count = count
+
+        def __len__(self) -> int:
+            """Return the complete manifest size."""
+            return self.count
+
+        def __call__(self, epoch: int):
+            """Yield the complete manifest for the requested epoch."""
+            return source(self.count)(epoch)
+
+    cfg = config(tmp_path, epochs=2)
+    cfg["training"]["max_episodes_per_epoch"] = None
+    cfg["validation"]["max_episodes_per_epoch"] = None
+    cfg["training"]["scheduled_updates"] = None
+    train, validation = SizedSource(3), SizedSource(2)
+    logger = RecordingLogger()
+    runner = RecurrentTrainer(
+        cfg, train_episodes=train, validation_episodes=validation,
+        model=TinyModel(), loss_fn=loss_fn, logger=logger,
+    )
+    assert runner.scheduled_updates == 6
+    runner.train_epoch(0)
+    runner.validate_epoch(0)
+    assert runner.completed_updates == 3
+    assert sum("train/objective" in event for event in logger.events) == 3
+    assert sum("val/objective" in event for event in logger.events) == 2
+    runner.save_checkpoint(0, 1.0)
+
+    resumed_cfg = config(tmp_path / "resumed", epochs=2)
+    resumed_cfg["training"]["max_episodes_per_epoch"] = None
+    resumed_cfg["validation"]["max_episodes_per_epoch"] = None
+    resumed_cfg["training"]["scheduled_updates"] = None
+    resumed_logger = RecordingLogger()
+    resumed = RecurrentTrainer(
+        resumed_cfg, train_episodes=train, validation_episodes=validation,
+        model=TinyModel(), loss_fn=loss_fn, logger=resumed_logger,
+    )
+    resumed.resume_from_checkpoint(tmp_path / "epoch_0000.pt")
+    assert (resumed.next_epoch, resumed.completed_updates, resumed.scheduled_updates) == (1, 3, 6)
+    resumed.run()
+    assert (resumed.next_epoch, resumed.completed_updates) == (2, 6)
+    assert sum("train/objective" in event for event in resumed_logger.events) == 3
+    assert sum("val/objective" in event for event in resumed_logger.events) == 2
+
+
+def test_e01a_explicit_empty_sources_are_not_replaced(tmp_path: Path) -> None:
+    """Retain an empty supplied source and report the appropriate empty epoch."""
+    empty = SequentialVKittiEpisodeSource(
+        tmp_path, ["Scene01"], training=False, seed=17,
+        total_frames=24, image_size=14,
+    )
+    runner = RecurrentTrainer(
+        config(tmp_path), train_episodes=source(1), validation_episodes=empty,
+        model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+    )
+    assert runner.validation_episodes is empty
+    with pytest.raises(ValueError, match="epoch contains no episodes"):
+        runner.validate_epoch(0)
+
+    cfg = config(tmp_path)
+    cfg["training"]["max_episodes_per_epoch"] = None
+    cfg["training"]["scheduled_updates"] = None
+    with pytest.raises(ValueError, match="training manifest contains no eligible episodes"):
+        RecurrentTrainer(
+            cfg, train_episodes=empty, validation_episodes=source(1),
+            model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+        )
+
+
+def test_e01a_auto_horizon_requires_manifest_or_small_limit(tmp_path: Path) -> None:
+    """Avoid silently planning an update horizon from an unsized source."""
+    cfg = config(tmp_path)
+    cfg["training"]["max_episodes_per_epoch"] = None
+    cfg["training"]["scheduled_updates"] = None
+    with pytest.raises(ValueError, match="sized training source"):
+        RecurrentTrainer(
+            cfg, train_episodes=source(2), validation_episodes=source(1),
+            model=TinyModel(), loss_fn=loss_fn, logger=RecordingLogger(),
+        )
 
 
 def test_e01a_launch_dispatch_and_configured_sources_are_explicit(tmp_path: Path) -> None:
