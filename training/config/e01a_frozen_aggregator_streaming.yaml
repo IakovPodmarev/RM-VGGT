@@ -121,5 +121,6 @@ logging:
 
 checkpoint:
   save_dir: logs/${exp_name}/ckpts
+  save_every_epochs: 5
   resume_checkpoint_path: null
   pretrained_checkpoint_path: null

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import ExitStack
+from dataclasses import asdict, is_dataclass
+import hashlib
+import math
 import os
 from typing import Any
 
@@ -17,7 +21,8 @@ from training.recurrent_episode import RecurrentEpisodeModule
 from training.recurrent_loss import compute_recurrent_losses
 from training.recurrent_sequence import run_recurrent_sequence
 from training.recurrent_step import run_recurrent_train_step
-from training.recurrent_trainer import RecurrentTrainer, _mean_metrics, _metrics, _scalar
+from training.recurrent_trainer import RecurrentTrainer, _mean_metrics, _metrics, _restore_rng, _rng_state, _scalar
+from training.train_utils.checkpoint import robust_torch_save
 
 
 class _NullLogger:
@@ -34,11 +39,16 @@ class DistributedRecurrentTrainer(RecurrentTrainer):
         """Bind torchrun rank, initialize DDP, and retain underlying model groups.
 
         Training and validation sources must expose eligible_windows and
-        load_window. Full distributed checkpoint continuation is unsupported.
+        load_window. A requested resume is applied after DDP initialization.
         """
         cfg = OmegaConf.to_container(OmegaConf.create(config), resolve=True)
-        if cfg["checkpoint"].get("resume_checkpoint_path"):
-            raise ValueError("distributed checkpoint resume is not implemented")
+        resume_path = cfg["checkpoint"].get("resume_checkpoint_path")
+        if resume_path and cfg["checkpoint"].get("pretrained_checkpoint_path"):
+            raise ValueError("pretrained initialization and full resume are mutually exclusive")
+        cfg["checkpoint"]["resume_checkpoint_path"] = None
+        checkpoint_every_epochs = cfg["checkpoint"].get("save_every_epochs", 5)
+        if isinstance(checkpoint_every_epochs, bool) or not isinstance(checkpoint_every_epochs, int) or checkpoint_every_epochs <= 0:
+            raise ValueError("checkpoint.save_every_epochs must be a positive integer")
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -52,6 +62,7 @@ class DistributedRecurrentTrainer(RecurrentTrainer):
             raise ValueError("distributed recurrent training requires CPU or CUDA")
         cfg["training"]["episodes_per_update"] = world_size
         self.rank, self.world_size, self.local_rank = rank, world_size, local_rank
+        self.checkpoint_every_epochs = checkpoint_every_epochs
         if dist.is_initialized():
             raise RuntimeError("process group is already initialized")
         dist.init_process_group("nccl" if device.type == "cuda" else "gloo", init_method="env://")
@@ -67,6 +78,8 @@ class DistributedRecurrentTrainer(RecurrentTrainer):
                 device_ids=[local_rank] if device.type == "cuda" else None,
             )
             self.gradient_coordinator = DistributedGradientCoordinator()
+            if resume_path:
+                self.resume_from_checkpoint(resume_path)
         except BaseException:
             dist.destroy_process_group()
             raise
@@ -198,12 +211,186 @@ class DistributedRecurrentTrainer(RecurrentTrainer):
             self._log_episode("val_epoch", dict(summary, real_episodes=int(totals[1].item())), epoch)
         return summary
 
+    def _resume_signature(self) -> dict[str, Any]:
+        """Describe the ordered episode manifests and settings that fix epoch work."""
+        def manifest(source: Any, limit: int | None) -> tuple[Any, ...]:
+            """Record every ordered eligible window, including frame IDs where present."""
+            windows = tuple(source.eligible_windows())
+            return tuple(
+                (window.identity, asdict(window) if is_dataclass(window) else tuple(getattr(window, "frame_ids", ())))
+                for window in (windows[:limit] if limit is not None else windows)
+            )
+
+        cfg = self.config
+        return {
+            "world_size": self.world_size,
+            "train_manifest": manifest(self.train_episodes, self.train_limit),
+            "validation_manifest": manifest(self.validation_episodes, self.validation_limit),
+            "sequence": cfg["sequence"],
+            "episode_sources": cfg.get("episode_sources"),
+            "dataset_split": cfg.get("dataset_split"),
+            "seed_value": self.seed,
+            "training": cfg["training"],
+            "validation": cfg["validation"],
+            "optim": cfg["optim"],
+            "model": cfg.get("model"),
+            "loss": cfg.get("loss"),
+            "memory": cfg.get("memory"),
+        }
+
+    def save_checkpoint(self, completed_epoch: int, validation_objective: float) -> None:
+        """Gather rank RNG and write periodic, final, or improved state on rank zero.
+
+        Epoch files are written at the configured interval and final epoch,
+        retaining the two most recently written numbered files. Best state is
+        separate and written on each improvement. Rank-zero write and cleanup
+        failures or incompatible manifests are reported to every rank.
+        """
+        local = None
+        error = None
+        try:
+            local = {"rng": _rng_state(), "signature": self._resume_signature()}
+        except Exception as exc:
+            error = repr(exc)
+        self._reports({"error": error}, epoch=completed_epoch)
+        gathered: list[dict[str, Any]] = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        error = None
+        if self.rank == 0:
+            try:
+                signature = gathered[0]["signature"]
+                if any(item["signature"] != signature for item in gathered[1:]):
+                    raise ValueError("distributed episode manifests or configuration differ across ranks")
+                improved = validation_objective < self.best_validation_objective
+                best = float(validation_objective) if improved else self.best_validation_objective
+                checkpoint = {
+                    "model": self.model.state_dict(),
+                    "optimizer": self.optimizer.optimizer.state_dict(),
+                    "scaler": self.scaler.state_dict(),
+                    "scheduler_progress": self.completed_updates / self.scheduled_updates,
+                    "scheduled_updates": self.scheduled_updates,
+                    "completed_epoch": completed_epoch,
+                    "next_epoch": completed_epoch + 1,
+                    "completed_updates": self.completed_updates,
+                    "skipped_attempts": self.skipped_attempts,
+                    "validation_objective": float(validation_objective),
+                    "best_validation_objective": best,
+                    "config": self.config,
+                    "run_metadata": self.run_metadata,
+                    "world_size": self.world_size,
+                    "resume_signature": signature,
+                    "rng_states": [item["rng"] for item in gathered],
+                }
+                save_epoch = (completed_epoch + 1) % self.checkpoint_every_epochs == 0 or completed_epoch + 1 == self.max_epochs
+                if save_epoch or improved:
+                    self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                if save_epoch:
+                    epoch_path = self.checkpoint_dir / f"epoch_{completed_epoch:04d}.pt"
+                    robust_torch_save(checkpoint, str(epoch_path))
+                if improved:
+                    robust_torch_save(checkpoint, str(self.checkpoint_dir / "best.pt"))
+                if save_epoch:
+                    numbered = sorted(
+                        (path for path in self.checkpoint_dir.glob("epoch_*.pt") if path.stem[6:].isdigit()),
+                        key=lambda path: (path.stat().st_mtime_ns, path == epoch_path, path.name),
+                    )
+                    for stale in numbered[:-2]:
+                        stale.unlink()
+                self.best_validation_objective = best
+            except Exception as exc:
+                error = repr(exc)
+        self._reports({"error": error}, epoch=completed_epoch)
+        if self.rank != 0:
+            self.best_validation_objective = min(self.best_validation_objective, float(validation_objective))
+
+    def resume_from_checkpoint(self, checkpoint_path: str | os.PathLike[str]) -> None:
+        """Restore one verified shared checkpoint and this rank's RNG state.
+
+        Resolve paths and compare bytes from each rank's open file before
+        loading from those same handles. CUDA generators are initialized before
+        restoration so lazy seeding cannot overwrite saved states. Local open,
+        load, and restoration errors are reported to every rank.
+        """
+        paths: list[str] = [None] * self.world_size
+        dist.all_gather_object(paths, os.path.realpath(os.fspath(checkpoint_path)))
+        if len(set(paths)) != 1:
+            self._reports({"error": "resume checkpoint paths differ across ranks"}, epoch=-1)
+        with ExitStack() as checkpoint_files:
+            checkpoint_file = None
+            digest = None
+            error = None
+            try:
+                checkpoint_file = checkpoint_files.enter_context(open(checkpoint_path, "rb"))
+                hasher = hashlib.sha256()
+                for chunk in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+                digest = hasher.digest()
+                checkpoint_file.seek(0)
+            except Exception as exc:
+                error = repr(exc)
+            self._reports({"error": error}, epoch=-1)
+            digests: list[bytes] = [None] * self.world_size
+            dist.all_gather_object(digests, digest)
+            if len(set(digests)) != 1:
+                self._reports({"error": "resume checkpoint contents differ across ranks"}, epoch=-1)
+
+            state = None
+            error = None
+            try:
+                state = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+                required = {
+                    "model", "optimizer", "scaler", "scheduler_progress", "scheduled_updates",
+                    "completed_epoch", "next_epoch", "completed_updates", "skipped_attempts",
+                    "validation_objective", "best_validation_objective", "world_size",
+                    "resume_signature", "rng_states",
+                }
+                if not isinstance(state, Mapping) or not required <= state.keys():
+                    raise ValueError("distributed resume checkpoint is missing training state")
+                if state["world_size"] != self.world_size or len(state["rng_states"]) != self.world_size:
+                    raise ValueError("world size differs from resume checkpoint")
+                if state["resume_signature"] != self._resume_signature():
+                    raise ValueError("manifest or configuration differs from resume checkpoint")
+                if state["scheduled_updates"] != self.scheduled_updates:
+                    raise ValueError("scheduled update budget differs from resume checkpoint")
+                if state["next_epoch"] != state["completed_epoch"] + 1 or state["next_epoch"] < 1:
+                    raise ValueError("resume checkpoint epoch counters are inconsistent")
+                if state["completed_updates"] < 0 or state["skipped_attempts"] < 0:
+                    raise ValueError("resume checkpoint update counters are invalid")
+                if not math.isclose(state["scheduler_progress"], state["completed_updates"] / self.scheduled_updates):
+                    raise ValueError("resume checkpoint schedule progress is inconsistent")
+            except Exception as exc:
+                error = repr(exc)
+            self._reports({"error": error}, epoch=-1)
+            error = None
+            try:
+                self.model.load_state_dict(state["model"], strict=True)
+                self.model.to(self.device)
+                self.optimizer.optimizer.load_state_dict(state["optimizer"])
+                for item in self.optimizer.optimizer.state.values():
+                    for key, value in item.items():
+                        if torch.is_tensor(value):
+                            item[key] = value.to(self.device)
+                self.scaler.load_state_dict(state["scaler"])
+                self.next_epoch = int(state["next_epoch"])
+                self.completed_updates = int(state["completed_updates"])
+                self.skipped_attempts = int(state["skipped_attempts"])
+                self.best_validation_objective = float(state["best_validation_objective"])
+                self.run_metadata = dict(state["run_metadata"])
+                rank_rng = state["rng_states"][self.rank]
+                if rank_rng.get("cuda") is not None and torch.cuda.is_available():
+                    torch.cuda.get_rng_state_all()
+                _restore_rng(rank_rng)
+            except Exception as exc:
+                error = repr(exc)
+            self._reports({"error": error}, epoch=-1)
+
     def run(self) -> None:
-        """Run bounded epochs and close the process group without checkpointing."""
+        """Save each completed training and validation epoch, then close DDP."""
         try:
             for epoch in range(self.next_epoch, self.max_epochs):
                 self.train_epoch(epoch)
-                self.validate_epoch(epoch)
+                validation = self.validate_epoch(epoch)
+                self.save_checkpoint(epoch, validation["objective"])
                 self.next_epoch = epoch + 1
         finally:
             if self.rank == 0 and hasattr(self.logger, "finish"):

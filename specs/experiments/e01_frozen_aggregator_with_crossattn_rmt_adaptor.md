@@ -12,9 +12,10 @@ frames per segment and three segments completed both updates, validation, and
 checkpoint resume on one Tesla T4. Slice 8.1 corrected camera-label validity
 and actual optimizer-step accounting. Its gradient audits and a two-update
 float16 scale-256 training smoke are recorded below. That smoke closes the
-single-T4 feasibility check. Slice 8.2 specifies single-node DDP; it is not
-yet implemented. Offline evaluation and point-cloud visualization in slices 9–10
-remain unimplemented.
+single-T4 feasibility check. Slice 8.2 has a single-node DDP training,
+validation, and epoch-boundary checkpoint/resume path verified with two-rank
+CPU tests. The two- and six-T4 real-data smokes remain open. Offline evaluation
+and point-cloud visualization in slices 9–10 remain unimplemented.
 
 ## Objective
 
@@ -747,7 +748,11 @@ The accepted E01a defaults are:
 - update schedule: derive its planned update horizon from the training
   manifest size and epoch count; retain explicit small episode limits for
   smoke and diagnostic runs only
-- checkpoint: every epoch plus the lowest aggregate validation-objective model
+- checkpoint: single-process training saves every epoch; distributed training
+  saves numbered checkpoints every configured `checkpoint.save_every_epochs`
+  epochs (default `5`) and at the final epoch, retains the two most recently
+  written numbered checkpoints, and updates the separate best-validation
+  checkpoint whenever the aggregate validation objective improves
 
 The ordinary trainer detects whether `GradScaler.step` invoked AdamW. On an
 overflow skip it updates the scaler, restores the prior learning rates, logs a
@@ -868,6 +873,43 @@ split and cannot establish results for the current Scene02 split.
 
 ## Slice 8.2: single-node DDP on six Tesla T4 GPUs
 
+### Implementation checkpoint (2026-10-09)
+
+The current worktree adds a complete-episode DDP module, metadata-only
+deterministic episode grouping, rank-wide gradient finiteness and float16
+overflow coordination, and a distributed trainer for bounded training plus
+fixed-window validation. Each rank performs one full-episode forward and
+backward per synchronized update. Partial training groups use finite padded
+episodes with zero objective contribution and scale real objectives by
+world size divided by the real group count. Validation evaluates each fixed
+window once without padding and reduces episode loss sums and counts. Rank
+zero logs; the path records per-rank peak allocation and reports rank failures.
+
+The distributed trainer reuses the single-process setup and step code. Rank
+zero writes one epoch-boundary checkpoint containing shared model, AdamW,
+scaler, progress, and validation state plus each rank's RNG state and a
+manifest/configuration signature. Fresh processes restore their own RNG
+state and reject an incompatible manifest, schedule, world size, optimizer,
+or update horizon. Numbered checkpoints follow the configured interval
+(default `5`) plus the final epoch; only the two most recently written
+numbered files persist. The separate `best.pt` is updated on each validation
+improvement. Validation still runs every epoch, including epochs without a
+numbered checkpoint.
+
+The tested integration path is two-rank CPU/Gloo with a small synthetic model
+and bounded episodes; it is not a real VKITTI or T4 acceptance run. The
+focused distributed checkpoint, retention, resume, and single-process
+regression suite passed 40 tests on 2026-10-09. The float16 overflow
+coordinator uses PyTorch 2.4.1's private recorded found-inf tensors because
+there is no public post-unscale merge API; tests compare its complete scaler
+state with a native overflow skip. Recheck this access on a PyTorch upgrade.
+
+The active distributed update uses one episode per rank and gradient
+accumulation of one. A global batch larger than the GPU count requires a
+later design and implementation: several independent full-episode backwards
+per rank, one synchronized optimizer attempt, and loss scaling by the number
+of real episodes. This is not part of the current slice 8.2 acceptance run.
+
 After the slice 8.1 feasibility smoke, add optional one-process-per-GPU DDP. First test
 two T4s, then all six. Each rank owns one complete ordered episode per
 synchronized update, preserving three segments, full BPTT, and memory reset
@@ -896,9 +938,12 @@ advances none of their optimizers or schedulers. With BF16 or FP32 and disabled
 scaling, reject nonfinite gradients before any rank updates. Shard fixed
 validation episodes without counting padding, then reduce loss sums and
 counts to the same episode-weighted global mean as single-process validation.
-Rank zero writes the checkpoint; all ranks restore identical model, optimizer,
-scaler, and scheduler states plus rank-specific RNG and data-position state
-for exact continuation. Record per-rank failures and shut down cleanly.
+Rank zero writes the checkpoint on the configured interval and final epoch,
+retaining the two most recently written numbered files; the separate best
+checkpoint is updated on each validation improvement. All ranks restore
+identical model, optimizer, scaler, and scheduler states plus rank-specific RNG
+and epoch-boundary data-position state for exact continuation. Record per-rank
+failures and shut down cleanly.
 
 Focused checks cover two-rank gradient equivalence to the mean of independent
 episode gradients, full recurrent gradient flow, a partial final group,
