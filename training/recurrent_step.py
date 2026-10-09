@@ -78,14 +78,15 @@ def run_recurrent_train_step(
 
     Raises:
         ValueError: If normalized scheduler progress or the sequence objective
-            is invalid or nonfinite.
+            is invalid or nonfinite, or disabled scaling leaves nonfinite gradients.
         TypeError: If collaborators do not provide the required callable
             optimizer, scaler, clipping, sequence, or loss capabilities.
         RuntimeError: If the scaler invokes the optimizer more than once.
 
     Side effects:
         Zeros gradients once, runs one scaled backward call, unscales once,
-        clips the combined trainable set once, attempts the next scheduled rates,
+        checks unscaled gradients when scaling is disabled, clips the combined
+        trainable set once, attempts the next scheduled rates,
         restores them on a skipped optimizer step, and updates the scaler once.
 
     Invariants:
@@ -118,6 +119,10 @@ def run_recurrent_train_step(
     scaler.unscale_(underlying)
     if diagnostic is not None:
         diagnostic.after_unscale(model, scaler)
+    if not scaler.is_enabled():
+        for name, parameter in model.named_parameters():
+            if parameter.requires_grad and parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+                raise ValueError(f"nonfinite gradient with disabled GradScaler: {name}")
     norm = gradient_clipper(model)
     if isinstance(norm, Mapping):
         if len(norm) != 1:

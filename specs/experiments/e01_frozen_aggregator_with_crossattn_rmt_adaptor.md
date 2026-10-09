@@ -9,13 +9,12 @@ aggregation, optimizer behavior, and dataset contract are fixed below. Slices
 1–7 were implemented against the original three-segment, eight-frame schedule.
 Slice 8 added configurable frame counts. A two-phase real-data smoke at five
 frames per segment and three segments completed both updates, validation, and
-checkpoint resume on one Tesla T4. Slice 8.1 is implemented in the current
-worktree: camera-label validity now controls camera loss, and ordinary training
-counts only actual optimizer steps. Its E01 suite reported 169 passes; the
-three-episode float16 gradient audit and incomplete full-precision probe are
-recorded below. Independent review of the slice 8.1 diff remains pending.
-Offline evaluation and point-cloud visualization in slices 9–10 remain
-unimplemented.
+checkpoint resume on one Tesla T4. Slice 8.1 corrected camera-label validity
+and actual optimizer-step accounting. Its gradient audits and a two-update
+float16 scale-256 training smoke are recorded below. That smoke closes the
+single-T4 feasibility check. Slice 8.2 specifies single-node DDP; it is not
+yet implemented. Offline evaluation and point-cloud visualization in slices 9–10
+remain unimplemented.
 
 ## Objective
 
@@ -63,6 +62,7 @@ In scope:
 - full backpropagation through every inter-segment recurrent boundary
 - camera and depth supervision on every segment
 - a sequential VKITTI adapter and memory-disabled control
+- optional single-node DDP after the slice 8.1 trial
 
 Out of scope for `E01a`:
 
@@ -76,8 +76,8 @@ Out of scope for `E01a`:
 - LoRA or unfreezing aggregator layers
 - point and tracking heads
 - carrying memory between different scenes or dataloader samples
-- multi-node or multi-GPU validation; E01a is established on one training
-  process before distributed support is considered
+- multi-node training or cross-node validation; single-node DDP is specified
+  separately in slice 8.2
 
 ## High-level data flow
 
@@ -827,35 +827,90 @@ least three seeds, per-segment and aggregate losses/metrics, trainable parameter
 counts, runtime, and peak VRAM. No improvement claim is made from the synthetic
 fixture or one-sample overfit test.
 
-## Slice 8.1 evidence and remaining questions
+## Slice 8.1: precision evidence and single-T4 feasibility
 
-The current staged implementation removes the inherited first-frame point-mask
-camera gate and makes ordinary float16 update accounting depend on an actual
-underlying AdamW call. Focused tests cover camera masks and empty eligibility,
-a forced skipped attempt followed by a real update, learning-rate restoration,
-and checkpoint resume. The E01 suite reported 169 passes with two existing
-Hydra warnings; the run record is
-`/var/tmp/rm-vggt-slice81-audit/audit_notes.md` on `tesla`.
+The camera-validity and actual-optimizer-step fixes are implemented. Their
+targeted audit reported 169 E01 tests passing; the historical record is
+`/var/tmp/rm-vggt-slice81-audit/` on `tesla`. At `3 x 5`, three scale-1
+float16 AdamW updates gave nonzero current depth-adaptor gradients in 23/41,
+3/41, and 1/41 parameter tensors. AdamW movement does not establish a current
+gradient. The initial full-precision probe exhausted T4 memory before
+backward.
 
-A targeted float16 audit used the active `3 x 5`, `518 x 518` profile, seed 42,
-scaler initial scale 1.0, and three distinct real VKITTI training episodes.
-All three attempts called AdamW and none was skipped. The depth read adaptor
-had nonzero current gradients in 23/41, 3/41, then 1/41 parameter tensors.
-On the final episode only the residual gate had a nonzero current gradient.
-Many tensors still changed when their current gradients were zero; AdamW
-momentum and weight decay can account for those changes. The detached per-tensor
-norms, zero-element counts, episode identities, losses, scaler scale, and step
-counts are in `/var/tmp/rm-vggt-slice81-audit/float16.json` on `tesla`.
+At `3 x 4`, a later diagnostic used three distinct deterministic VKITTI
+episodes with matched weights and frame IDs. All nine full-precision backwards
+completed in fresh processes without AdamW moments. At initialization and
+after two scale-1 updates, scale-256 float16 probes had finite gradients in
+every trainable module and nonzero gradients in all 40 depth adaptor body
+tensors on all nine episode/snapshot pairs. Body-gradient cosines against
+full precision were at least 0.993; relative L2 errors were 0.0085–0.1197.
+Scale 4096 was nonfinite in eight of nine pairs. These were no-update probes;
+`3 x 4` and `3 x 5` results are different schedules. Evidence is in
+`/var/tmp/rm-vggt-depth-scale-20261007-01/` on `tesla`.
 
-A same-episode full-precision probe ran out of T4 memory in the third segment
-before the depth head and before backward. Its report is
-`/var/tmp/rm-vggt-slice81-audit/float32_probe.json`. Float16 underflow remains
-a plausible explanation, not a demonstrated cause. Diagnose the repeated
-weak or zero depth-adaptor body gradients before claiming that its main body
-learns reliably. These three updates are diagnostic evidence, not a controlled
-training outcome or scientific comparison. Retain raw logs, resolved configs,
-checkpoints, losses, learning rates, runtime, and memory evidence for any
-exploratory run. The 24-frame scale-up remains unverified.
+A subsequent `3 x 5` T4 smoke with float16 initial loss scale 256 completed
+two actual AdamW updates, one after checkpoint resume, with no skips. Both
+updates had nonzero current gradients in all 40 depth adaptor body tensors.
+The scaler stayed at 256; PyTorch peak allocations were 12,639,475,200 and
+14,828,217,344 bytes. This run used the former Scene20 validation split;
+the record is
+`/var/tmp/rm-vggt-e01a-fp16-scale256-3x5-20261008-01/summary.json`.
+It establishes two-update feasibility, not sustained learning.
+
+The earlier proposal for a separate 20-attempt single-T4 trial is
+superseded by the successful two-update smoke. Further gradient stability
+must be monitored during DDP smoke and exploratory training, including
+actual AdamW calls and skips, scaler changes, unscaled depth-adaptor body
+norms and zero fractions, clipping, losses, and per-rank memory. Investigate
+repeated body-zero gradients, gate-only gradients, repeated skips, OOM, or
+nonfinite parameters as they occur. The old smoke used a different validation
+split and cannot establish results for the current Scene02 split.
+
+## Slice 8.2: single-node DDP on six Tesla T4 GPUs
+
+After the slice 8.1 feasibility smoke, add optional one-process-per-GPU DDP. First test
+two T4s, then all six. Each rank owns one complete ordered episode per
+synchronized update, preserving three segments, full BPTT, and memory reset
+between episodes. Use one DDP forward covering the complete episode and its
+local sequence objective, followed by one backward. The frozen aggregator
+remains frozen. DDP replicates model and AdamW state per GPU; it does not pool
+memory. Record each rank's peak allocation. An OOM at `3 x 5` fails that
+profile and requires a separately labeled design decision.
+
+Shuffle eligible training windows deterministically once per epoch using a
+shared seed. Form global groups of at most `world_size` distinct episodes
+and assign each real episode to exactly one rank. For a final group with
+`R < world_size` real episodes, inactive ranks execute a finite padded
+episode with zero objective contribution so all ranks join the same
+collectives. Multiply each real rank's local objective by
+`world_size / R`; DDP's rank average then yields the mean over the `R`
+real episodes. Do not count padding in losses, metrics, or episode totals.
+A global update is one synchronized optimizer attempt with effective batch
+`R`, normally six. Derive the planned horizon from
+`ceil(eligible_train_episodes / world_size) * epochs`, or record an explicit
+bounded-run horizon. Label comparisons by global batch and update schedule.
+
+All ranks must agree on gradient finiteness, whether AdamW ran, scaler state,
+completed-update count, and scheduler position. A float16 overflow skip
+advances none of their optimizers or schedulers. With BF16 or FP32 and disabled
+scaling, reject nonfinite gradients before any rank updates. Shard fixed
+validation episodes without counting padding, then reduce loss sums and
+counts to the same episode-weighted global mean as single-process validation.
+Rank zero writes the checkpoint; all ranks restore identical model, optimizer,
+scaler, and scheduler states plus rank-specific RNG and data-position state
+for exact continuation. Record per-rank failures and shut down cleanly.
+
+Focused checks cover two-rank gradient equivalence to the mean of independent
+episode gradients, full recurrent gradient flow, a partial final group,
+nonfinite/skip consensus, deterministic disjoint sharding, global validation
+aggregation, and resume. Then run a real `3 x 5` float16 scale-256 smoke using the current scene
+split on two T4s and six T4s, each with a complete update, validation, and
+fresh-process resume. Record actual optimizer calls, unique episodes, losses,
+depth-body gradients, scaler changes, and peak VRAM per rank. Once the
+six-rank smoke passes, start the exploratory training run with these checks
+active; a separate 20-attempt single-T4 run is not a prerequisite. Keep the
+single-T4 path as a regression check. Treat DDP throughput and learning as
+separate measurements from single-GPU runs.
 
 ## Implementation sequence
 
@@ -871,8 +926,10 @@ Implementation proceeds in small verified slices:
 8. make frame counts configurable, then run the real VKITTI end-to-end
    training and checkpoint-resume smoke test at the active five-frame,
    three-segment schedule
-8.1. correct camera-label eligibility and skipped-update accounting, then
-     audit depth-adaptor current gradients across real episodes
+8.1. correct camera-label eligibility and skipped-update accounting, audit
+     depth-adaptor gradients, and establish two-update single-T4 feasibility
+     at float16 scale 256
+8.2. add single-node DDP with two-rank checks and a six-T4 end-to-end smoke
 9. add and test offline episode-level Sim(3)-aligned ATE and point RMSE
 10. add and test point-cloud visualization based on existing utilities
 11. run one-sample overfit, then the controlled multi-seed experiment
@@ -926,12 +983,12 @@ E01a must preserve the following:
   in a fixed-length episode.
 - Full BPTT retains trainable camera/DPT/writer/adaptor activations for all
   configured segments and may exceed the target GPU budget at `518 x 518`.
-- The slice 8.1 three-episode float16 audit found nonzero current gradients
-  in 23/41, 3/41, and 1/41 depth read-adaptor parameter tensors. The last
-  episode reached only the residual gate. AdamW momentum and weight decay
-  changed some tensors with zero current gradients. The full-precision probe
-  exhausted T4 memory before backward, so the cause and reliability of the
-  adaptor body's learning remain unresolved.
+- The original slice 8.1 scale-1 audit reached only the depth residual
+  gate on its final `3 x 5` episode. Matched `3 x 4` scale-256 probes
+  restored finite body gradients, and two later `3 x 5` scale-256 AdamW
+  updates kept all 40 body tensors nonzero. Sustained training, zero-element
+  fractions, later overflow behavior, and the first operation causing
+  scale-1 gradient loss remain open.
 - The initial `0.1` adaptor residual gates trade exact baseline equivalence for
   immediate gradient flow into the new memory path.
 - A scene-disjoint VKITTI split has few validation scenes, so multi-seed

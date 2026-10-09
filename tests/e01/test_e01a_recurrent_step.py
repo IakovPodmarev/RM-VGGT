@@ -121,6 +121,10 @@ class _Scaler:
         """Initialize ordered operation recording."""
         self.events: list[str] = []
 
+    def is_enabled(self) -> bool:
+        """Match the disabled scaler used by the unscaled test path."""
+        return False
+
     def scale(self, objective: Tensor) -> "_Scaler":
         """Retain and record the sole objective selected for backward."""
         self.events.append("scale")
@@ -213,3 +217,91 @@ def test_e01a_cpu_bfloat16_autocast_smoke_path() -> None:
     result = run_recurrent_train_step(model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper, scaler=scaler, gradient_clipper=clipper, autocast_enabled=True, autocast_dtype=torch.bfloat16, autocast_device_type="cpu", scheduler_progress=.25, num_segments=3, segment_frames=8)
     assert torch.isfinite(result.losses.objective)
 
+
+
+@pytest.mark.parametrize("mode", ["bfloat16", "float32"])
+def test_e01a_unscaled_nonfinite_backward_stops_before_update(mode: str) -> None:
+    """A finite loss with an infinite backward gradient cannot reach AdamW."""
+    model, clipper = _Model(), _Clipper()
+    wrapper = construct_optimizer_for_component_groups(model, _conf(), _specs(model))
+    underlying = wrapper.optimizer
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            parameter.grad = torch.ones_like(parameter)
+    underlying.step()
+    underlying.zero_grad(set_to_none=True)
+    weights = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    state = {parameter: {key: value.clone() for key, value in values.items()} for parameter, values in underlying.state.items()}
+    rates = [group["lr"] for group in underlying.param_groups]
+    calls = []
+    handle = underlying.register_step_post_hook(lambda *_args: calls.append(True))
+    wrapper.step_schedulers = lambda _progress: pytest.fail("scheduler must not run")
+    hook = model.depth_head.weight.register_hook(lambda gradient: torch.full_like(gradient, float("inf")))
+    try:
+        with pytest.raises(ValueError, match="nonfinite gradient.*depth_head.weight"):
+            run_recurrent_train_step(
+                model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper,
+                scaler=torch.amp.GradScaler("cpu", enabled=False), gradient_clipper=clipper,
+                autocast_enabled=mode == "bfloat16", autocast_dtype=getattr(torch, mode),
+                autocast_device_type="cpu", scheduler_progress=.25, num_segments=3, segment_frames=8,
+            )
+    finally:
+        hook.remove()
+        handle.remove()
+    assert not calls and clipper.calls == 0
+    assert [group["lr"] for group in underlying.param_groups] == rates
+    assert all(torch.equal(parameter, weights[name]) for name, parameter in model.named_parameters())
+    assert underlying.state.keys() == state.keys()
+    assert all(torch.equal(value, state[parameter][key]) for parameter, values in underlying.state.items() for key, value in values.items())
+
+
+def test_e01a_scaled_nonfinite_backward_skips_adamw_and_schedule() -> None:
+    """FP16 overflow backs off the scaler and preserves the update position."""
+    model, clipper = _Model(), _Clipper()
+    wrapper = construct_optimizer_for_component_groups(
+        model, _conf(), _specs(model), schedulers=[{"lr": lambda progress: 1e-4 * progress}, {"lr": lambda progress: 5e-5 * progress}],
+    )
+    underlying = wrapper.optimizer
+    weights = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    rates = [group["lr"] for group in underlying.param_groups]
+    calls = []
+    progress = []
+    handle = underlying.register_step_post_hook(lambda *_args: calls.append(True))
+    schedule = wrapper.step_schedulers
+    wrapper.step_schedulers = lambda value: (progress.append(value), schedule(value))[1]
+    hook = model.depth_head.weight.register_hook(lambda gradient: torch.full_like(gradient, float("inf")))
+    scaler = torch.amp.GradScaler("cpu", init_scale=8.0)
+    try:
+        result = run_recurrent_train_step(
+            model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper,
+            scaler=scaler, gradient_clipper=clipper, autocast_enabled=True,
+            autocast_dtype=torch.float16, autocast_device_type="cpu", scheduler_progress=.25,
+            num_segments=3, segment_frames=8,
+        )
+    finally:
+        hook.remove()
+        handle.remove()
+    assert torch.isfinite(result.losses.objective)
+    assert result.optimizer_ran is False and not calls
+    assert scaler.get_scale() == 4.0
+    assert progress == [.25] and [group["lr"] for group in underlying.param_groups] == rates
+    assert clipper.calls == 1 and not underlying.state
+    assert all(torch.equal(parameter, weights[name]) for name, parameter in model.named_parameters())
+
+
+def test_e01a_finite_backward_calls_adamw_once() -> None:
+    """The finiteness guard preserves the ordinary finite-gradient update."""
+    model, clipper = _Model(), _Clipper()
+    wrapper = construct_optimizer_for_component_groups(model, _conf(), _specs(model))
+    calls = []
+    handle = wrapper.optimizer.register_step_post_hook(lambda *_args: calls.append(True))
+    try:
+        result = run_recurrent_train_step(
+            model=model, segments=_stream(model), loss_fn=_loss, optimizer=wrapper,
+            scaler=torch.amp.GradScaler("cpu", enabled=False), gradient_clipper=clipper,
+            autocast_enabled=False, autocast_dtype=torch.float32, autocast_device_type="cpu",
+            scheduler_progress=.25, num_segments=3, segment_frames=8,
+        )
+    finally:
+        handle.remove()
+    assert result.optimizer_ran is True and calls == [True] and clipper.calls == 1
