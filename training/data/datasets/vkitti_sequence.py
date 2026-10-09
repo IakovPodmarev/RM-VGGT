@@ -45,6 +45,11 @@ class VKittiEpisodeWindow:
     start_frame_id: int
     frame_ids: tuple[int, ...]
 
+    @property
+    def identity(self) -> str:
+        """Return the stable identity shared with a loaded raw episode."""
+        return f"vkitti/{self.scene}/{self.variation}/{self.camera_id}/{self.start_frame_id:05d}"
+
 
 class SequentialVKittiEpisodeSource:
     """Provide complete raw CPU episodes in deterministic epoch order.
@@ -96,6 +101,14 @@ class SequentialVKittiEpisodeSource:
     def __len__(self) -> int:
         """Return the number of complete eligible windows in the cached manifest."""
         return len(self._manifest())
+
+    def eligible_windows(self) -> tuple[VKittiEpisodeWindow, ...]:
+        """Return ordered window metadata without decoding episode frames."""
+        return self._manifest()
+
+    def load_window(self, window: VKittiEpisodeWindow) -> RawEpisode:
+        """Load one eligible window only when its assigned rank requests it."""
+        return self._load(window)
 
     def __call__(self, epoch: int) -> Iterable[RawEpisode]:
         """Return a lazy iterable of complete episodes for an integer epoch.
@@ -241,9 +254,8 @@ class SequentialVKittiEpisodeSource:
             for frame in window.frame_ids
         ]
         images, depths, extrinsics, intrinsics, world_points, cam_points, masks, sizes = zip(*processed)
-        identity = f"vkitti/{window.scene}/{window.variation}/{window.camera_id}/{window.start_frame_id:05d}"
         return {
-            "seq_name": [identity],
+            "seq_name": [window.identity],
             "episode_metadata": {
                 "scene": window.scene, "variation": window.variation, "camera": window.camera_id,
                 "start_frame_id": window.start_frame_id, "end_frame_id": window.frame_ids[-1],

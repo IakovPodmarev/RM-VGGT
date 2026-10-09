@@ -307,14 +307,18 @@ class RecurrentTrainer:
             episodes_per_epoch = len(self.train_episodes)
             if episodes_per_epoch <= 0:
                 raise ValueError("training manifest contains no eligible episodes")
+        episodes_per_update = int(training.get("episodes_per_update", 1))
+        if episodes_per_update <= 0:
+            raise ValueError("episodes per update must be positive")
+        planned_updates = self.max_epochs * math.ceil(episodes_per_epoch / episodes_per_update)
         configured_updates = training.get("scheduled_updates")
         if configured_updates is None:
-            self.scheduled_updates = self.max_epochs * episodes_per_epoch
+            self.scheduled_updates = planned_updates
         else:
             self.scheduled_updates = int(configured_updates)
         if self.scheduled_updates <= 0:
             raise ValueError("scheduled updates must be positive")
-        if self.scheduled_updates < self.max_epochs * episodes_per_epoch:
+        if self.scheduled_updates < planned_updates:
             raise ValueError("scheduled updates must cover the configured training budget")
         self.total_frames = int(sequence["total_frames"])
         self.segment_frames = int(sequence["segment_frames"])

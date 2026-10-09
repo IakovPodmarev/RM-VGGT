@@ -71,7 +71,7 @@ def make_trainer(cfg: DictConfig, *, trainer_factory=None):
 
 
 def main() -> None:
-    """Parse a config name, construct its selected trainer, and run it."""
+    """Parse a config and Hydra overrides, construct its trainer, and run it."""
     parser = argparse.ArgumentParser(
         description="Train model with configurable YAML file"
     )
@@ -81,8 +81,9 @@ def main() -> None:
         default="default",
         help="Name of the config file (without .yaml extension, default: default)",
     )
+    parser.add_argument("overrides", nargs="*", help="Hydra key=value overrides")
     args = parser.parse_args()
-    trainer = make_trainer(load_config(args.config))
+    trainer = make_trainer(load_config(args.config, args.overrides))
     trainer.run()
 
 

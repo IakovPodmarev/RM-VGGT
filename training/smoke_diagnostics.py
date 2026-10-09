@@ -395,19 +395,28 @@ class UpdateDiagnostic:
         finally:
             handle.remove()
 
-    def after_update(self, model: Any, optimizer: Any, scaler: Any) -> None:
-        """Record a real step or scaler skip and distinguish gradient-driven movement."""
+    def after_update(
+        self, model: Any, optimizer: Any, scaler: Any, *, shared_skip: bool = False,
+    ) -> None:
+        """Record an update or skip, including a coordinated skip before clipping.
+
+        A shared skip requires one backward, no clipping or scheduling, and no
+        optimizer call. The default retains the single-process audit contract.
+        """
         if self._steps not in (0, 1):
             raise ValueError(
                 f"expected at most one underlying optimizer step, got {self._steps}"
             )
+        expected = (1, 0, 0) if shared_skip else (1, 1, 1)
+        if shared_skip and self._steps != 0:
+            raise ValueError("coordinated skip invoked the optimizer")
         if self._current and (
             self._backward_calls,
             self._clip_calls,
             self._schedule_calls,
-        ) != (1, 1, 1):
+        ) != expected:
             raise ValueError(
-                "expected one backward, clipping, and scheduler advancement"
+                "unexpected backward, clipping, or scheduler counts"
             )
         changed = {component: [] for component in _COMPONENTS}
         for name, parameter in model.named_parameters():

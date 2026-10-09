@@ -50,6 +50,9 @@ def run_recurrent_train_step(
     num_segments: int,
     segment_frames: int,
     diagnostic: Any | None = None,
+    episode_module: Any | None = None,
+    objective_scale: float = 1.0,
+    gradient_coordinator: Callable[[Any, Any, Any], bool] | None = None,
 ) -> RecurrentTrainStepResult:
     """Run one full-BPTT sequence and attempt one optimizer update.
 
@@ -68,6 +71,15 @@ def run_recurrent_train_step(
         autocast_device_type: Device type passed to the autocast context.
         num_segments: Exact number of ordered prepared mappings to consume.
         segment_frames: Required image-frame count in every consumed mapping.
+        episode_module: Optional DDP-wrapped complete-episode module. Its forward
+            runs the sequence and loss once; model remains the underlying segment
+            model for optimizer, clipping, diagnostics, and parameter names.
+        objective_scale: Finite nonnegative factor applied to the one backward
+            objective. Use zero for padding and world size divided by real
+            episode count for active ranks of a partial DDP group.
+        gradient_coordinator: Optional rank-wide finiteness decision called
+            after unscale. Enabled-scaler overflow is prepared for a native
+            skip; disabled-scaler nonfinite gradients raise on every rank.
         diagnostic: Optional observer for geometry, unscaled gradients, clipping,
             scheduled rates, and the actual underlying optimizer step. It must
             retain detached evidence only and release temporary hooks on error.
@@ -78,15 +90,17 @@ def run_recurrent_train_step(
 
     Raises:
         ValueError: If normalized scheduler progress or the sequence objective
-            is invalid or nonfinite, or disabled scaling leaves nonfinite gradients.
+            or objective scale is invalid or nonfinite, or disabled scaling leaves
+            nonfinite gradients.
         TypeError: If collaborators do not provide the required callable
             optimizer, scaler, clipping, sequence, or loss capabilities.
         RuntimeError: If the scaler invokes the optimizer more than once.
 
     Side effects:
         Zeros gradients once, runs one scaled backward call, unscales once,
-        checks unscaled gradients when scaling is disabled, clips the combined
-        trainable set once, attempts the next scheduled rates,
+        checks unscaled gradients locally or through the coordinator before
+        diagnostic inspection, clips only after a shared finite decision, and
+        attempts the next scheduled rates only for an eligible update,
         restores them on a skipped optimizer step, and updates the scaler once.
 
     Invariants:
@@ -99,6 +113,8 @@ def run_recurrent_train_step(
     """
     if not 0.0 <= scheduler_progress <= 1.0:
         raise ValueError("scheduler progress must be in [0, 1]")
+    if not isinstance(objective_scale, (int, float)) or isinstance(objective_scale, bool) or not 0.0 <= objective_scale < float("inf"):
+        raise ValueError("objective scale must be finite and nonnegative")
     optimizer.zero_grad(set_to_none=True)
     recorded = []
     def stream():
@@ -106,34 +122,43 @@ def run_recurrent_train_step(
             recorded.append(segment)
             yield segment
     with torch.autocast(device_type=autocast_device_type, dtype=autocast_dtype, enabled=autocast_enabled):
-        sequence = run_recurrent_sequence(model, stream(), num_segments=num_segments, segment_frames=segment_frames)
-        losses = compute_recurrent_losses(sequence, recorded, loss_fn, num_segments=num_segments)
+        if episode_module is None:
+            sequence = run_recurrent_sequence(model, stream(), num_segments=num_segments, segment_frames=segment_frames)
+            losses = compute_recurrent_losses(sequence, recorded, loss_fn, num_segments=num_segments)
+            objective = losses.objective
+        else:
+            objective, sequence, losses, recorded = episode_module(segments, loss_fn)
     if not torch.isfinite(losses.objective).all():
         raise ValueError("sequence objective must be finite")
     if diagnostic is not None:
         diagnostic.before_update(model, sequence, losses, recorded, optimizer)
-    scaler.scale(losses.objective).backward()
+    scaler.scale(objective if objective_scale == 1.0 else objective * objective_scale).backward()
     if diagnostic is not None:
         diagnostic.after_backward()
     underlying = optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer
     scaler.unscale_(underlying)
+    shared_finite = True
+    if gradient_coordinator is not None:
+        shared_finite = gradient_coordinator(model, underlying, scaler)
     if diagnostic is not None:
         diagnostic.after_unscale(model, scaler)
-    if not scaler.is_enabled():
+    if gradient_coordinator is None and not scaler.is_enabled():
         for name, parameter in model.named_parameters():
             if parameter.requires_grad and parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                 raise ValueError(f"nonfinite gradient with disabled GradScaler: {name}")
-    norm = gradient_clipper(model)
-    if isinstance(norm, Mapping):
-        if len(norm) != 1:
-            raise ValueError("gradient clipper must report one combined norm")
-        norm = next(iter(norm.values()))
-    if diagnostic is not None:
+    norm = None
+    if shared_finite:
+        norm = gradient_clipper(model)
+        if isinstance(norm, Mapping):
+            if len(norm) != 1:
+                raise ValueError("gradient clipper must report one combined norm")
+            norm = next(iter(norm.values()))
+    if diagnostic is not None and shared_finite:
         diagnostic.after_clip(norm)
     previous_rates = [group["lr"] for group in underlying.param_groups]
-    if hasattr(optimizer, "step_schedulers"):
+    if shared_finite and hasattr(optimizer, "step_schedulers"):
         optimizer.step_schedulers(scheduler_progress)
-    if diagnostic is not None:
+    if diagnostic is not None and shared_finite:
         diagnostic.after_schedule(optimizer, scheduler_progress)
     calls = 0
 
@@ -154,9 +179,14 @@ def run_recurrent_train_step(
     scaler.update()
     if calls not in (0, 1):
         raise RuntimeError(f"expected at most one optimizer call, got {calls}")
+    if gradient_coordinator is not None and calls != int(shared_finite):
+        raise RuntimeError("optimizer call disagrees with distributed gradient decision")
     if calls == 0:
         for group, rate in zip(underlying.param_groups, previous_rates):
             group["lr"] = rate
     if diagnostic is not None:
-        diagnostic.after_update(model, optimizer, scaler)
+        diagnostic.after_update(
+            model, optimizer, scaler,
+            shared_skip=gradient_coordinator is not None and not shared_finite,
+        )
     return RecurrentTrainStepResult(sequence, losses, norm, calls == 1)
